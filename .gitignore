@@ -1,0 +1,9 @@
+# ChatGPT アカウントの認証トークン — 絶対にコミットしない
+auth/auth.json
+auth/github.env
+
+# ローカル状態・パッケージ
+*.skill.zip
+*.tar.gz
+node_modules/
+__pycache__/

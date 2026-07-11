@@ -1,0 +1,12 @@
+{
+  "_note": "ローカルの ~/.codex/auth.json をそのままこのフォルダに auth.json としてコピーしてください(README参照)",
+  "auth_mode": "chatgpt",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "eyJ...",
+    "access_token": "eyJ...",
+    "refresh_token": "...",
+    "account_id": "..."
+  },
+  "last_refresh": "2026-07-11T00:00:00.000Z"
+}
