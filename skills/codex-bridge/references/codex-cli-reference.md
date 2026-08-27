@@ -17,7 +17,7 @@
 - **APIキー禁止の担保**: 全スクリプトが `OPENAI_API_KEY`/`CODEX_API_KEY` をunset、
   auth.json内も null
 
-### モデル(このアカウント契約・2026-07時点のスナップショット)
+### モデル(ChatGPT Plus契約・2026-07時点のスナップショット)
 | id | default | efforts |
 |---|---|---|
 | gpt-5.6-sol | ✔ | low/medium/high/**xhigh/max/ultra** |
@@ -102,6 +102,11 @@ stdioでnewline-delimited JSON-RPC:
 
 ## 3. 認証が切れた時(401)
 
+`ask.sh`/`wait.sh`はcodexの失敗ログ(`could not be refreshed` 等の文字列)を見て
+**自動的に手順1へ入る**(`scripts/_lib.sh`の`codex_bridge_report_failure`、
+2026-08-27に実機の401で検証済み)。以下は手動で行う場合、またはgrepパターンが
+CLI更新でズレた場合の参照用。
+
 優先順:
 1. **スマホ完結(PC不要)**: `python3 scripts/login.py gen` で認可URLを生成 →
    ユーザーがブラウザで開きGoogleログイン → `localhost:1455/...` への接続失敗ページの
@@ -144,3 +149,62 @@ PKCE S256)を使う。定数がズレたら手順2-7でバイナリから再抽�
   実プロンプト抽出時は先頭が `<` のものをスキップする(sessions.sh list の実装参照)
 - 関連サブコマンド: `resume` / `fork`(セッション分岐) / `archive` / `unarchive` / `delete`。
   対話用の `codex resume`(ピッカー)は非対話環境では使わない
+
+## 6. バックグラウンド実行とポーリング(検証済み: 2026-08-27)
+
+### 制約の正体
+Claudeのサンドボックスは、Claudeが**ツール呼び出しを終えて発言(ターン)を終了した
+瞬間に停止する**。これは実機検証済みで、原因の詳細(VM一時停止か
+破棄かプロセスグループごとの回収か)は不明だが、対策は原因によらず同じ:
+**ターン内でツール呼び出しを継続し、発言を終わらせない**こと以外に生存手段はない。
+
+### 実装(`ask.sh`のバックグラウンド降格 + `wait.sh`)
+- `$CODEX_HOME/bg/<job_id>/` に `pid` / `log`(codexの全stdout+stderr) / `exit_code` /
+  `done`(センチネル) / `answer.md`(`-o`の出力先) / `meta`(started_at等)を持つ
+- 起動は `setsid sh -c '...' </dev/null >"$JOB_DIR/log" 2>&1 &` で行い、`$!` をPIDとして
+  記録。**util-linux 2.39.3のsetsidは対象コマンドをexecで置き換えるだけでforkしない
+  (実機確認済み: `$!` が最後まで実プロセスのPIDと一致し、`kill -0 $!` で生死判定できる)**。
+  将来util-linuxの挙動が変わり `-f/--fork` 相当がデフォルト化された場合、この前提が
+  崩れて「即死んだように見える」誤検知が起きうる → `setsid --version` で確認し、
+  ズレていたら `ps -o pid,ppid,pgid,sid,cmd -p $!` で実際にセッションリーダーに
+  なっているか確認すること
+- 内側の runner スクリプトは **`set -e` を使わない**(`codex exec`が非0で終わった時に
+  `ec=$?`以降の後始末行(exit_code書き込み・doneセンチネル)がスキップされるのを防ぐため。
+  一度これで「終わらないジョブ」を作って気づいた)
+- `wait.sh` は `<job_id> [max_wait_seconds=60] [poll_interval_seconds=5]` を受け取り、
+  シェル自身のsleepループで待つ。Claude側の追加トークン消費は「1回の短いツール呼び出し
+  + 1行の結果」のみ
+- インライン待機の既定値 `CODEX_INLINE_MAX_SECONDS=240`、単発ポーリングの既定
+  `max_wait_seconds=60` は**このサンドボックスの1コマンドあたりの実際の上限を計測して
+  決めた値ではない**(計測は行っていない・会話を長時間ブロックしないための保守的な
+  目安値)。将来、単発の `bash_tool` 呼び出しがこれより早く/遅く打ち切られることが
+  観測されたら、この節を更新して値を調整すること
+
+### 認証切れの自動検知(`scripts/_lib.sh`)
+`codex_bridge_report_failure()` は失敗したジョブの `log` を
+`could not be refreshed|Invalid refresh token|invalid_refresh_token` でgrepし、
+一致すれば `login.py gen` をその場で実行する。2026-08-27、実際に期限切れの
+auth.jsonに対して実機検証済み(このgrepパターンで捕捉できることを確認)。
+CLI更新でエラー文言が変わった場合はこのパターンを更新すること
+(`codex exec --help` や実際に401を起こして文言を確認するのが確実)。
+
+### 孤児/クラッシュ検知が`kill -0`単独では機能しない(実機で判明: 2026-08-27)
+`ask.sh`がジョブを起動した直後は`setsid`ランナーの親はask.sh自身だが、
+**ask.shのプロセスが(インライン待機を終えて)先に終了すると、ランナーは即座に
+PID 1へ再親化される**。このサンドボックスのPID 1は子を積極的に回収する
+init(tiniやdumb-init相当)ではないらしく、その状態でランナーが死ぬと
+**ゾンビ(`<defunct>`, `STAT=Z`)のまま残り続ける**。そして`kill -0`はゾンビPIDに
+対しても成功を返す(プロセステーブルにエントリが残っている限り)ため、
+「`kill -0`が通れば生きている」という素朴な判定だと**クラッシュしたジョブが
+永久に`status=running`と誤判定され続ける**。実際に`kill -9`でランナーを殺して
+実機確認して初めて気づいた(`ps -o stat`で`Zs`と表示された)。
+
+対策(`_lib.sh:codex_bridge_job_alive`に実装済み): `kill -0`ではなく
+`/proc/<pid>/stat`を直接読み、状態文字(3番目のフィールド。commフィールドは
+括弧付きでスペースを含みうるので、最後の`) `より後ろを見て数える)が`Z`なら
+「生きていない」扱いにする。PID再利用対策の起動時刻照合も同じ`/proc/<pid>/stat`の
+22番目のフィールド(strip後は20番目)`starttime`で行う。この節の一致検証は
+`ask.sh`(記録側)と`_lib.sh`(照合側)の両方を変更した時は必ず両方揃えること
+(フィールド番号を数え間違えるとstarttimeが常に不一致判定になり、生きている
+ジョブまでorphan扱いされる――実装時に一度この番号を数え間違えて気づいた)。
+

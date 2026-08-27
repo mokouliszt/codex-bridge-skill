@@ -5,7 +5,8 @@ description: ユーザーのChatGPTサブスクリプション枠(Codex OAuth)�
 
 # codex-bridge — サブスク枠のCodex(GPT-5.6 Sol)をClaudeの手足・相談役にする
 
-検証済み環境: codex-cli 0.144.1 / 2026-07-10 / ChatGPT認証で `gpt-5.6-sol` end-to-end動作確認済み。
+検証済み環境: codex-cli 0.144.1(2026-07-10)/ 0.150.1(2026-08-27, 実行系・認証系のみ再検証)。
+いずれもChatGPT認証で `gpt-5.6-sol` end-to-end動作確認済み。
 将来のCLI/モデル変更で挙動がズレたら `references/codex-cli-reference.md` の自己調査手順に従うこと。
 
 ## このSkillの2つの運用モード
@@ -23,6 +24,49 @@ Claude(特に高知識・高単価モデル)がトークン消費の激しい実
 - Claudeは成果物ファイルを検収し、必要箇所だけ読む。**Codexの長い出力を会話に丸写ししない**
   (これがトークン節約の本体。ユーザーへはファイルをそのまま提示すればよい)
 - 反復修正はセッション機能で履歴を引き継ぐ(次節)
+
+## 長時間タスクとサンドボックスの生存(重要・必読)
+
+**codexはClaudeのサンドボックス内のプロセスであり、Claude側のサーバーとは無関係。**
+そのため**Claudeがツール呼び出しを終えて発言(ターン)を終了した瞬間、サンドボックス
+ごと停止し、実行中のcodexプロセスも道連れで失われる**(実機で確認済みの制約)。
+これはバックグラウンド実行にしても回避できない――回避できるのは「ターン内で
+ツール呼び出しを継続し、発言を終わらせない」ことだけ。
+
+この制約に対応するため、`ask.sh` は以下のように動く:
+
+1. まず既定240秒(`CODEX_INLINE_MAX_SECONDS`で変更可)だけインラインで待つ。
+   この間に終われば**呼び出し方も結果の受け取り方も従来通り**
+   (stdout + `/tmp/codex_last.md`)。短い相談(モードA)はほぼ常にここで完結する。
+2. 240秒以内に終わらなければ自動的にバックグラウンドジョブへ切り替わり、
+   `job_id` を出力して **exit 75** で返る。
+   **最初から長時間になるとわかっている場合**(ultra effortでの大規模委譲等)は
+   `CODEX_ASYNC=1` を付けてインライン待機を省略してよい。
+
+バックグラウンドへ切り替わったら:
+
+```bash
+bash ./skills/codex-bridge/scripts/wait.sh <job_id>          # 既定: 最大60秒だけ待って返る
+bash ./skills/codex-bridge/scripts/wait.sh <job_id> 90 5      # 待機上限/ポーリング間隔(秒)を指定
+```
+
+`wait.sh` は**このシェルコマンド自身がsleepループしながらPIDの生死を見る**ので、
+Claude側が別途sleepしたり長考する必要はない。出力は `status=running ...` または
+`status=done ...` の1行だけで、育っていくログを毎回貼り直すことはしない――
+これがトークン消費を抑える本体(失敗時のみ簡潔なエラー要約を追加で出す)。
+
+**絶対に守ること: `status=running` である間は、相槌や進捗コメントを書いて
+ターンを終わらせず、`wait.sh` を間を置かず呼び出し続けること。**
+`status=done` になって初めて `/tmp/codex_last.md` を読み、ユーザーへの返答を
+まとめてよい。ポーリング自体はローカルでPIDを見るだけでChatGPTサブスク枠は
+消費しない(枠を消費するのは実際のcodex exec呼び出しのみ)。
+
+ジョブの状態を見失った場合(会話が長くなって job_id を忘れた等):
+
+```bash
+bash ./skills/codex-bridge/scripts/jobs.sh list     # 全ジョブのid/状態/開始時刻/プロンプト冒頭
+bash ./skills/codex-bridge/scripts/jobs.sh clean    # 完了済み(24h超)ジョブの後片付け。任意
+```
 
 ## セッション機能(会話履歴の保持・再開)
 
@@ -73,6 +117,14 @@ bash ./skills/codex-bridge/scripts/setup.sh
 npm install(20〜40秒)→ auth.json配置 → config.toml生成 → 最新モデル解決 → ログイン状態表示。
 `command -v codex` で導入済み判定可。
 
+**auth.jsonがskill同梱にもCODEX_HOMEにも一切無い場合**(公開リポジトリからの新規
+チェックアウト等、認証情報が意図的に外されている状態)、setup.shは警告を出すだけで
+終わらず、**その場で`login.py gen`まで自動実行し認可URLを出力する**。表示された
+URL・手順をそのままユーザーへ中継し、貼り返された失敗ページのURLで
+`python3 scripts/login.py exchange "<URL>"` を実行すればよい。auth.jsonが無いまま
+`ask.sh`がcodex execを試みることはない(setup.sh後もauth.jsonが無ければexit 3で
+明示的に止まり、生のCLIエラーは出さない)。
+
 ### 2. 実行
 
 ```bash
@@ -85,7 +137,12 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示"    # 特�
 
 - 最終回答: stdout + `/tmp/codex_last.md`(長い場合はファイルを読む方が確実)
 - env: `CODEX_MODEL=<id>` モデル上書き / `CODEX_JSON=1` JSONLイベント出力 /
-  `CODEX_DRYRUN=1` 実行せずコマンド確認
+  `CODEX_DRYRUN=1` 実行せずコマンド確認 /
+  `CODEX_ASYNC=1` 最初からバックグラウンド実行(長時間タスク前提) /
+  `CODEX_INLINE_MAX_SECONDS=<n>` インライン待機の上限(既定240)
+- 240秒(既定)を超える、またはCODEX_ASYNC=1の場合は `job_id` を返してバックグラウンドへ
+  切り替わる。**この後の運用は必ず「長時間タスクとサンドボックスの生存」節に従うこと**
+  (ターンを終わらせずwait.shを呼び続ける)
 - 権限は最も緩い構成(`--dangerously-bypass-approvals-and-sandbox` +
   `danger-full-access` + approval never)で固定済み。CLI側で「外部サンドボックス内での
   実行用」と明記されたフラグであり、Claudeサンドボックス内なので適切
@@ -110,13 +167,23 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示"    # 特�
 
 | 症状 | 対処 |
 |---|---|
-| 401 Unauthorized | auth.json失効。`scripts/login.py` でスマホ完結の再認証(references参照)、またはPCで `codex login` → auth.json差し替え |
+| 401 / リフレッシュトークン失効(auth.jsonは存在するが無効) | **自動検出済み**: ask.sh/wait.shがcodexの失敗ログを見て検知し、その場で`login.py gen`を実行してURLを出す。ユーザーへ中継→貼り戻されたURLで`login.py exchange`するだけでよい |
+| auth.jsonが最初から存在しない | setup.shが自動的に同じ`login.py gen`フローへ入る(上と同じ手順)。ask.sh exit 3 |
+| `ask.sh` が exit 75 | エラーではない。バックグラウンドへ切り替わっただけ。`job_id`を控えて`wait.sh`を呼び続ける(「長時間タスクとサンドボックスの生存」節) |
+| `wait.sh` が `status=unknown` | job_idの誤り/期限切れ、または不正な形式(パス区切りを含む等)。`jobs.sh list` で確認 |
+| `wait.sh` が `status=crashed exit_code=125` | ジョブプロセスがdone/exit_code書き込み前に消えた(OOM・SIGKILL・PID再利用の誤検出等)。ログtailを見て原因を確認。ポーリングし続ける必要はない、実質的な失敗として扱う |
+| `setup.sh` が exit 4 | auth.jsonがAPIキー形式(`OPENAI_API_KEY`が非null)。ユーザー方針違反として自動的にauth.jsonを削除して停止する。ChatGPT認証で作り直すこと |
 | `stream disconnected` / Reconnecting | 一時的なネットワーク断。リトライで解消することが多い |
 | モデル名エラー(400) | `scripts/models.sh list` で契約上の有効モデルを確認 |
 | フラグ/設定キーが効かない | CLI更新で仕様変更の可能性。references の自己調査手順へ |
 
 ## 注意
 
-- auth.json・トークン文字列を会話/成果物/ログに**絶対に転記しない**
+- auth.json・トークン文字列を会話/成果物/ログに**絶対に転記しない**(login.py実行時に
+  表示されるPKCE verifier・認可URLも同様に扱う――コンテナ再起動対策として画面には出るが、
+  会話の要約やメモリへの保存対象にはしない)
 - skill配置ディレクトリは読み取り専用のため、実行時状態はすべて `$CODEX_HOME`
-  (`/home/claude/.codex-bridge`)に置かれる
+  (`/home/claude/.codex-bridge`)に置かれる。バックグラウンドジョブは
+  `$CODEX_HOME/bg/<job_id>/`(pid・log・exit_code・done・answer.md・meta)
+- `scripts/_lib.sh` は `ask.sh`/`wait.sh` が読み込む共有関数のみのファイルで、
+  直接実行するものではない(shebangなし)

@@ -89,7 +89,8 @@ def cmd_exchange(arg: str, verifier_override) -> None:
                 saved = json.load(f)
             verifier = saved["verifier"]
             if state_in and saved.get("state") and state_in != saved["state"]:
-                print("WARNING: state不一致(別セッションのgen?)。続行はするが失敗したらgenからやり直し。")
+                sys.exit("ERROR: state不一致(別セッションのgenの可能性)。CSRF対策のstateが"
+                         "一致しない交換は安全に継続できない。login.py gen からやり直すこと。")
         except FileNotFoundError:
             sys.exit("ERROR: pkce_state.json がない(コンテナがリセットされた)。"
                      "gen時に表示されたverifierを --verifier で渡すこと。")
