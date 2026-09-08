@@ -8,12 +8,12 @@ A Claude.ai [Skill](https://www.anthropic.com/news/skills) that runs the officia
 
 ## What it does
 
-- **Knowledge support (consult mode)** — Claude asks GPT-5.6 Sol (xhigh+ reasoning, web search on) for a second opinion on hard or specialized questions, then verifies and integrates the answer.
+- **Knowledge support (consult mode)** — Claude asks GPT-6.0 Astra (medium by default; low for simple work, web search on) for a second opinion on hard or specialized questions, then verifies and integrates the answer.
 - **Work offload (delegate mode)** — Claude hands off token-heavy generation, exhaustive work, or large file processing to Codex. Codex is told to write results to files; Claude only reads back what it needs, which is most of how this keeps Claude's own token usage down.
 - **Survives Claude's own turn ending** — Claude's sandbox is torn down the moment it finishes a reply with no more tool calls, which normally kills anything still running (including a long Codex job). `ask.sh` automatically falls back to a background job + `job_id` once a call runs long, and `wait.sh` lets Claude poll for completion cheaply (one short tool call and a one-line result per poll — never the growing log) without ending its turn. See [`SKILL.md`](skills/codex-bridge/SKILL.md) for the full mechanism.
 - **Session management** — `--continue` / `--resume <id>` for follow-ups that keep prior context. `sessions.sh export`/`import` carries a session across separate Claude conversations (the sandbox itself resets between them).
-- **Automatic newest-model adoption** — resolves the newest reasoning-capable model available on your plan via the app-server `model/list` API at setup time; picks up new models automatically as OpenAI ships them.
-- **Full Codex capability, unlocked** — web search on by default, least-restrictive execution flags (appropriate since it's already running inside Claude's own sandboxed environment), nested sandboxing (`codex sandbox`) for anything Codex should isolate further, `ultra` effort (automatic sub-agent task delegation) for large offloaded work.
+- **Astra model policy** — defaults to `gpt-6-astra` + `medium`. Without an explicit user request, Claude uses only Astra `low` or `medium`, including retries and resumed sessions. Other models or higher effort require an explicit user request. No automatic newest-model adoption or fallback; legacy model caches are ignored.
+- **Full Codex capability, unlocked** — web search on by default, least-restrictive execution flags (appropriate since it's already running inside Claude's own sandboxed environment), nested sandboxing (`codex sandbox`) for anything Codex should isolate further, `ultra` effort (automatic sub-agent task delegation) only when explicitly requested by the user.
 - **Phone-only authentication** — no PC required. `scripts/login.py` walks through a PKCE-based OAuth flow entirely from the Claude mobile app: Claude prints an authorization URL, you complete it in your browser, then paste back the failed-redirect page's URL.
 - **Self-healing auth** — if `auth.json` is missing entirely (e.g. a fresh checkout of this repo) or its refresh token has died, `setup.sh`/`ask.sh` detect it and automatically start the same phone-only re-auth flow instead of surfacing a raw CLI error.
 
@@ -25,7 +25,7 @@ Claude.ai (web / mobile)
      ├─ npm install -g @openai/codex        ← setup.sh (once per sandbox)
      ├─ $CODEX_HOME/auth.json               ← your ChatGPT OAuth tokens
      └─ codex exec "prompt"                 ← ask.sh (foreground, or backgrounded + polled via wait.sh for long jobs)
-         └─ chatgpt.com/backend-api/codex/… ← GPT-5.6 Sol answers, billed to your subscription
+         └─ chatgpt.com/backend-api/codex/… ← GPT-6.0 Astra answers, billed to your subscription
 ```
 
 No API key (metered billing) is ever used — the scripts force-unset `OPENAI_API_KEY`/`CODEX_API_KEY`, and `setup.sh` now also rejects an `auth.json` whose contents are API-key-shaped, not just the env vars. Token refresh is handled automatically by the official CLI.
@@ -73,16 +73,18 @@ Just ask naturally in conversation:
 
 Claude recognizes the skill and runs `setup.sh` → `ask.sh` on its own — including, for long-running work, keeping the sandbox alive and polling `wait.sh` until Codex finishes.
 
+Default: `gpt-6-astra` / `medium`; simple work may use `low`. An explicit model request can be passed via `CODEX_MODEL` or the third argument; an explicit effort request via the second argument. Unspecified fields keep their defaults. Invalid effort values are rejected.
+
 ## Scripts
 
 | Script | Role |
 |---|---|
-| `scripts/setup.sh` | Installs the CLI, deploys `auth.json`, writes config, resolves the newest model. Idempotent. Also validates `auth.json` isn't API-key-shaped and starts phone-only re-auth automatically when credentials are missing. |
-| `scripts/ask.sh` | Main entry point: `"prompt" [xhigh\|max\|ultra] [model]`, `--continue`, `--resume <id>`. Waits inline up to `CODEX_INLINE_MAX_SECONDS` (default 240s), then automatically falls back to a background job + `job_id` (`CODEX_ASYNC=1` skips straight to background for jobs you already expect to run long). |
+| `scripts/setup.sh` | Installs the CLI, deploys `auth.json`, writes Astra medium defaults (existing config is preserved; `ask.sh` supplies model/effort explicitly). Idempotent. Also validates `auth.json` isn't API-key-shaped and starts phone-only re-auth automatically when credentials are missing. |
+| `scripts/ask.sh` | Main entry point: `"prompt" [low\|medium\|high\|xhigh\|max\|ultra] [model]`, `--continue`, `--resume <id>`. Waits inline up to `CODEX_INLINE_MAX_SECONDS` (default 240s), then automatically falls back to a background job + `job_id` (`CODEX_ASYNC=1` skips straight to background for jobs you already expect to run long). |
 | `scripts/wait.sh` | Polls a backgrounded job (`<job_id> [max_wait_seconds] [poll_interval_seconds]`). Each call blocks internally via a real sleep loop — Claude just calls it again until it reports done, keeping its own token use to one short tool call per poll. Detects a crashed/orphaned job (process gone but no completion marker) rather than reporting "running" forever. |
 | `scripts/jobs.sh` | `list` / `clean [max_age_seconds]` for background jobs — recovery if a `job_id` gets lost, and housekeeping for finished jobs. |
 | `scripts/_lib.sh` | Shared shell functions (`ask.sh`/`wait.sh` only — not meant to be run directly): job-id validation, liveness/crash detection, and the auth-failure auto-recovery trigger. |
-| `scripts/models.sh` | Lists models available on your plan (`list`) or resolves the newest one meeting policy (`resolve`). |
+| `scripts/models.sh` | Lists models available on your plan (`list`) or checks that `gpt-6-astra` supports low/medium (`resolve`, no fallback). |
 | `scripts/sessions.sh` | Lists / exports / imports Codex sessions, for continuing work across separate Claude conversations. |
 | `scripts/login.py` | The phone-only PKCE auth flow — generates and exchanges `auth.json` without a PC. |
 

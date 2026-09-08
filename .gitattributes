@@ -1,0 +1,20 @@
+# Auto-detect text files and normalize line endings on checkin.
+* text=auto
+
+# Shell scripts must be LF. CRLF breaks POSIX shell parsing at reserved
+# words (elif / case...in / then / do), which is exactly what happened
+# in scripts/ask.sh, models.sh, setup.sh, _lib.sh, jobs.sh, wait.sh.
+*.sh text eol=lf
+
+# Everything else in this repo: keep LF too, so a Windows checkout can't
+# silently reintroduce CRLF into files that get cat'd into shell heredocs
+# or read by scripts.
+*.py  text eol=lf
+*.md  text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+.gitignore text eol=lf
+
+# auth.json (real, gitignored) and its example must also stay LF so a
+# copy-paste of the example keeps valid JSON formatting.
+auth/*.json text eol=lf

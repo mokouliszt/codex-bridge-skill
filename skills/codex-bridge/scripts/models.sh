@@ -3,10 +3,8 @@
 #
 # usage:
 #   models.sh list      human-readable table of models available to this account
-#   models.sh resolve   print the newest policy-compliant model id
-#                       (policy: supports reasoning effort >= xhigh;
-#                        pick highest gpt-<major>.<minor>; tie-break:
-#                        isDefault > 'sol' variant > widest effort range)
+#   models.sh resolve   print gpt-6-astra only if available with low and medium
+#                       (never auto-select another model)
 set -eu
 export CODEX_HOME="${CODEX_HOME:-/home/claude/.codex-bridge}"
 unset OPENAI_API_KEY CODEX_API_KEY 2>/dev/null || true
@@ -14,7 +12,7 @@ unset OPENAI_API_KEY CODEX_API_KEY 2>/dev/null || true
 MODE="${1:-list}"
 
 exec python3 - "$MODE" <<'PYEOF'
-import subprocess, json, time, os, re, sys
+import subprocess, json, time, os, sys
 
 mode = sys.argv[1]
 p = subprocess.Popen(["codex", "app-server"],
@@ -47,8 +45,6 @@ p.kill()
 if not data:
     sys.exit("model/list failed (protocol change? see references/codex-cli-reference.md)")
 
-ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-
 def efforts(m):
     return [e.get("reasoningEffort") for e in (m.get("supportedReasoningEfforts") or [])]
 
@@ -58,20 +54,15 @@ if mode == "list":
           f"efforts={'/'.join(efforts(m))}")
     sys.exit(0)
 
-# resolve: policy filter -> xhigh or above supported
-def version(mid):
-    mt = re.match(r"gpt-(\d+)\.(\d+)", mid or "")
-    return (int(mt.group(1)), int(mt.group(2))) if mt else (-1, -1)
+if mode != "resolve":
+    sys.exit("usage: models.sh [list|resolve]")
 
-cands = [m for m in data if "xhigh" in efforts(m) and not m.get("hidden")]
-if not cands:
-    sys.exit("no xhigh-capable model found")
-
-best_ver = max(version(m["id"]) for m in cands)
-cands = [m for m in cands if version(m["id"]) == best_ver]
-cands.sort(key=lambda m: (bool(m.get("isDefault")),
-                          "sol" in m["id"],
-                          max(ORDER.index(e) for e in efforts(m) if e in ORDER)),
-           reverse=True)
-print(cands[0]["id"])
+# Pin the user-selected Astra family; do not follow isDefault or newer models.
+for m in data:
+    if (m.get("id") == "gpt-6-astra" and not m.get("hidden")
+            and {"low", "medium"}.issubset(efforts(m))):
+        print(m["id"])
+        sys.exit(0)
+sys.exit("gpt-6-astra with low/medium is unavailable; no automatic fallback. "
+         "Run models.sh list and ask the user before choosing another model.")
 PYEOF

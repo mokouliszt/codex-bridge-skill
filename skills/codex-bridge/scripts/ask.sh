@@ -2,12 +2,12 @@
 # codex-bridge runner
 #
 # usage:
-#   ask.sh "prompt" [effort] [model]      effort: xhigh(default) | max | ultra
+#   ask.sh "prompt" [effort] [model]      effort: medium(default) | low; other levels only on explicit user request
 #   ask.sh --continue "prompt"            resume the most recent session
 #   ask.sh --resume <session_id> "prompt" resume a specific session (id: sessions.sh list)
 #
 # env:
-#   CODEX_MODEL=<id>              model override (else: model_cache -> config default)
+#   CODEX_MODEL=<id>              explicit user model override (else: gpt-6-astra)
 #   CODEX_JSON=1                  emit JSONL events
 #   CODEX_DRYRUN=1                print the final command instead of executing
 #   CODEX_SEARCH=0                disable web search (default: enabled)
@@ -45,7 +45,7 @@ if [ "${1:-}" = "--continue" ] || [ "${1:-}" = "-C" ]; then
 elif [ "${1:-}" = "--resume" ] || [ "${1:-}" = "-r" ]; then
   RESUME_ID="${2:?--resume requires a session id}"; shift 2
 fi
-[ $# -ge 1 ] || { echo "usage: ask.sh [--continue | --resume <id>] \"prompt\" [xhigh|max|ultra] [model]"; exit 2; }
+[ $# -ge 1 ] || { echo "usage: ask.sh [--continue | --resume <id>] \"prompt\" [low|medium|high|xhigh|max|ultra] [model]"; exit 2; }
 
 # lazy setup
 if ! command -v codex >/dev/null 2>&1 || [ ! -f "$CODEX_HOME/auth.json" ]; then
@@ -61,14 +61,15 @@ if [ ! -f "$CODEX_HOME/auth.json" ]; then
 fi
 
 PROMPT="$1"
-EFFORT="${2:-xhigh}"
-MODEL="${3:-${CODEX_MODEL:-}}"
-[ -z "$MODEL" ] && [ -f "$CODEX_HOME/model_cache" ] && MODEL=$(cat "$CODEX_HOME/model_cache")
+EFFORT="${2:-medium}"
+MODEL="${3:-${CODEX_MODEL:-gpt-6-astra}}"
 
-# policy: never below xhigh
+# Always pass both values, including on resume: legacy config, model_cache and
+# session settings must not override the current defaults. The caller must only
+# select another model or effort outside low/medium on explicit user request.
 case "$EFFORT" in
-  xhigh|max|ultra) ;;
-  *) echo "[ask] effort '$EFFORT' is below policy floor -> clamped to xhigh" >&2; EFFORT="xhigh" ;;
+  low|medium|high|xhigh|max|ultra) ;;
+  *) echo "[ask] unsupported effort '$EFFORT'; use low|medium|high|xhigh|max|ultra" >&2; exit 2 ;;
 esac
 
 # Collision-checked job dir: mkdir (no -p) fails if it already exists, so a

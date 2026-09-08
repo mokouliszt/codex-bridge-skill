@@ -47,10 +47,11 @@ codex exec resume --last "prompt"            直前セッションの継続(コ�
 - 実行ヘッダに `model / approval / sandbox / reasoning effort` が表示されるので設定確認に使える
 - 実測: web検索付きの簡単な質問で約6.4kトークン消費
 
-### config.toml(`$CODEX_HOME/config.toml`、キー有効性確認済み)
+### config.toml(`$CODEX_HOME/config.toml`、現在の既定値)
+
 ```toml
-model = "gpt-5.6-sol"
-model_reasoning_effort = "xhigh"
+model = "gpt-6-astra"
+model_reasoning_effort = "medium"
 check_updates = false
 
 [tools]
@@ -123,7 +124,7 @@ PKCE S256)を使う。定数がズレたら手順2-7でバイナリから再抽�
 
 ## 4. 運用上の約束(ユーザー指定)
 
-- モデルは **GPT-5.6 Sol系(またはそれ以降の最新)+ effort xhigh以上のみ**
+- 既定は **GPT-6.0 Astra (`gpt-6-astra`) + medium**。ユーザーの明示指定がない限りAstraのlow/mediumのみ。別モデル・high以上への自動切替は禁止(詳細はSKILL.mdのモデルポリシー)
 - APIキー(従量課金)は**いかなる場合も使用しない**
 - auth.json・トークン・PATの中身を会話/ログ/成果物に出力しない
 - サブスク枠を尊重: 無駄撃ちしない。ただし委譲された大規模作業は遠慮なく実行

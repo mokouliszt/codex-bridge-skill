@@ -6,8 +6,8 @@
 #   checkout with credentials stripped), automatically starts the phone-only
 #   login flow (login.py gen) instead of just printing a hint -- the URL block
 #   below is meant to be relayed to the user verbatim.
-# - writes verified default config (gpt-5.6-sol / xhigh / web_search on)
-# - resolves & caches the newest policy-compliant model (future-proofing)
+# - writes default config (gpt-6-astra / medium / web_search on)
+# - leaves existing config intact; ask.sh explicitly supplies model and effort
 set -eu
 umask 077
 
@@ -73,13 +73,13 @@ sys.exit(1 if d.get("OPENAI_API_KEY") else 0)
   fi
 fi
 
-# 3) verified default config (codex-cli 0.144.1, 2026-07-10)
+# 3) default config; Astra availability depends on the authenticated account
 #    model/effort can still be overridden per-call by ask.sh
 if [ ! -f "$CODEX_HOME/config.toml" ]; then
   cat > "$CODEX_HOME/config.toml" <<'EOF'
-# codex-bridge defaults (verified 2026-07-10, codex-cli 0.144.1)
-model = "gpt-5.6-sol"
-model_reasoning_effort = "xhigh"
+# codex-bridge defaults (Astra medium policy)
+model = "gpt-6-astra"
+model_reasoning_effort = "medium"
 check_updates = false
 
 [tools]
@@ -88,17 +88,9 @@ EOF
   echo "[setup] config.toml written"
 fi
 
-# 4) resolve newest policy-compliant model (>= xhigh support), cache it.
-#    Best effort: on failure we keep the verified default. Skipped entirely
-#    when not yet authenticated -- model/list needs a logged-in account.
-if [ ! -f "$CODEX_HOME/model_cache" ] && [ -f "$CODEX_HOME/auth.json" ]; then
-  if RESOLVED=$(timeout 45 sh "$SKILL_DIR/scripts/models.sh" resolve 2>/dev/null) && [ -n "$RESOLVED" ]; then
-    echo "$RESOLVED" > "$CODEX_HOME/model_cache"
-    echo "[setup] newest policy-compliant model: $RESOLVED"
-  else
-    echo "[setup] model resolution skipped (using default gpt-5.6-sol)"
-  fi
-fi
+# 4) No automatic model switching or model_cache lookup. ask.sh pins the
+#    default on every call, so old caches/configs cannot revive the Sol policy.
+#    Use models.sh list/resolve to check account availability when needed.
 
 # 5) status
 codex login status || true
