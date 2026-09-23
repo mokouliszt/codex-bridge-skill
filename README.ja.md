@@ -14,6 +14,7 @@ Claude.ai の Skill として動作する、**ChatGPT サブスクリプショ�
 - **セッション機能** — `--continue` / `--resume <id>` で履歴を引き継いだ反復作業。export / import で Claude の会話をまたいだ継続も可能
 - **モデル・推論レベルはユーザーが選ぶ** — 既定値は無し。会話内で指定が無ければ、Claudeが実行前に問い直す(選択式UIがある環境ではそれを優先し、任意入力も可)。モデルは契約上利用可能なものを性能上位順に、推論レベルはタスクに見合うものを提示。選択は同じ会話内の再試行・セッション再開にも引き継ぎ、Claudeの判断でモデル変更やeffort引き上げはせず改めて問う。最新モデルへの自動追随・自動フォールバックはせず、旧モデルキャッシュも参照しない
 - **Codex の能力をフル解放** — web 検索 ON、最緩権限、ネストサンドボックス(`codex sandbox`)、ultra effort(サブエージェント自動委譲、ユーザーが選んだ時のみ)に対応
+- **サンドボックスを越えて生き残るリフレッシュトークン(任意)** — ChatGPTのリフレッシュトークンは使い捨てで、リフレッシュのたびにローテーションするが、CLIが新トークンを書くClaudeのサンドボックスは会話ごとに破棄される。S3互換バケット(Backblaze B2・R2・S3・MinIO等)の `auth/credentials.json` があれば、`token_store.py` がそのバケットの1オブジェクトに最新の `auth.json` を保存。セットアップ時に取得・古ければ先回りリフレッシュ、CLIがローテーションしたら保存、別の会話が先にローテーション済みなら再ログインなしで回復する
 - **スマホ完結の認証** — PC がなくても、Android/iOS の Claude アプリだけで PKCE フローによる auth.json 生成が可能(`scripts/login.py`)
 - **認証切れの自動回復** — auth.jsonが最初から存在しない場合も、リフレッシュトークンが失効した場合も、`setup.sh`/`ask.sh`が検知して同じスマホ完結の再認証フローを自動的に開始する(生のCLIエラーを見せない)
 
@@ -55,13 +56,23 @@ codex login       # ブラウザが開くので ChatGPT アカウントでログ
 
 skill を auth.json なしで一度アップロードし、Claude に「login.py で認証したい」と伝えてください。Claude が認可 URL を生成 → ブラウザでログイン → 失敗ページ(`localhost:1455/...`)の URL を貼り返す、という流れで auth.json を生成できます。詳細は `references/codex-cli-reference.md` の再認証手順を参照。この流れは**自動的にも起動します** — auth.json が無い、またはリフレッシュトークンが失効していることに気づいた時点で Claude 自身が開始するので、名指しで頼む必要はありません。
 
+### 1b. (任意・推奨)リフレッシュトークンの永続化
+
+これが無いと、同梱の `auth.json` は発行から約8日で使えなくなります(どこかの会話でCLIが1回リフレッシュし、ローテーション後のトークンはその会話のサンドボックスと一緒に消えるため)。
+
+1. S3互換バケットを用意。
+2. そのバケットに限定した**専用の**アクセスキーを作成(B2なら、対象バケット・`namePrefix` を `_codex-bridge/` に絞ったread/writeのアプリケーションキー)
+3. `auth/credentials.json.example` を `auth/credentials.json` にコピーし、`endpoint`・`region`・`bucket`・`key_id`・`application_key` を記入
+
+`auth/credentials.json` が無ければこれらの処理はすべてスキップされ、従来どおり動きます(boto3もインストールしません)。初回セットアップ時に同梱の `auth.json` で保存先を初期化し、以降は常に保存側を使います。状態は `python3 scripts/token_store.py status` で確認できます(日付のみ表示)。バケットで旧バージョンを保持している場合、過去のトークンがそこに残ります(使用済みリフレッシュトークンは無効、アクセストークンは最長10日有効)。気になる場合は該当プレフィックスにライフサイクル設定を入れてください。
+
 ### 2. zip 化して Claude.ai にアップロード
 
 ```bash
 zip -r codex-bridge.skill.zip codex-bridge/
 ```
 
-Claude.ai の 設定 → 機能(Capabilities)→ Skill からアップロードします。以後、同一アカウントの web / モバイルアプリの両方で使えます。
+Claude.ai の 設定 → スキル からアップロードします。以後、同一アカウントの web / モバイルアプリの両方で使えます。
 
 ### 3. 使う
 
@@ -85,6 +96,7 @@ Claude が skill を認識し、`setup.sh` → `ask.sh` を自律的に実行し
 | `scripts/jobs.sh` | バックグラウンドジョブの`list`/`clean [max_age_seconds]`。job_idを見失った時の復旧や、完了済みジョブの後片付けに使う |
 | `scripts/_lib.sh` | `ask.sh`/`wait.sh`専用の共有関数(直接実行しない): job_id検証、生存/クラッシュ判定、認証失敗の自動回復トリガー |
 | `scripts/models.sh` | 契約上の利用可能モデル一覧(`list`、CLIの返却順)と、ユーザーへの問い直し用に性能上位順へ並べた一覧(`choices`) |
+| `scripts/token_store.py` | S3互換バケットへのリフレッシュトークン永続化(`sync` / `push` / `recover` / `status`)。`setup.sh`・`ask.sh`・認証切れ処理・`login.py` から自動で呼ばれる。`auth/credentials.json` が無ければno-op |
 | `scripts/sessions.sh` | セッション一覧・エクスポート・インポート(会話をまたぐ継続用) |
 | `scripts/login.py` | PC 不要の PKCE 認証フロー(auth.json の生成・再生成) |
 
@@ -92,7 +104,7 @@ Claude 向けの運用知識(検証済みフラグ・config・app-server RPC・�
 
 ## セキュリティ上の注意
 
-- **`auth/auth.json` はあなたの ChatGPT アカウントのフルアクセストークンです。**
+- **`auth/auth.json` はあなたの ChatGPT アカウントのフルアクセストークンで、`auth/credentials.json` はそれを保存するバケットへのアクセス権です。** 両方を同等に扱ってください
   - auth.json 入りの skill zip は、自分の Claude.ai アカウント内にのみ留めてください
 - Codex の利用はあなたのサブスクリプション枠を消費します(実測目安: 単純応答 約 2.2k / 検索付き 約 6.4k / セッション再開 約 7.5k〜トークン)
 - `setup.sh`は`$CODEX_HOME`配下(バックグラウンドジョブのディレクトリ含む)に制限的な`umask`と700/600権限を設定します。ジョブのログやプロンプトは会話の他の部分と同様の内容を含みうるためです

@@ -94,6 +94,16 @@ codex_bridge_report_failure() {
   _exitcode="$2"
   _log="$_jd/log"
   if grep -qE "^([0-9TZ:.-]+[[:space:]]+)?ERROR.*(could not be refreshed|Invalid refresh token|invalid_refresh_token)" "$_log" 2>/dev/null; then
+    # A dead token here often just means another conversation already rotated
+    # it; if the token store holds a different (newer) one, adopt it and retry
+    # instead of sending the user through a full re-login.
+    _since=$(sed -n 's/^started_at=//p' "$_jd/meta" 2>/dev/null)
+    if [ ! -f "$_jd/reauth_started" ] && python3 "$SKILL_DIR/scripts/token_store.py" recover ${_since:+--since "$_since"}; then
+      echo "status=failed auth_status=recovered exit_code=$_exitcode"
+      echo "[codex-bridge] the local refresh token was stale, but the token store had a newer one"
+      echo "        and it is now in place -- re-run the same ask.sh call (no re-login needed)."
+      return 0
+    fi
     echo "status=failed auth_status=expired exit_code=$_exitcode"
     if [ -f "$_jd/reauth_started" ]; then
       echo "[codex-bridge] re-auth was already started for this job (see the URL from the first"

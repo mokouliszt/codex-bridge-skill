@@ -130,15 +130,20 @@ fi
 # Launch in a fully detached session (new sid/pgid via setsid) so the job survives
 # this one bash_tool call returning -- it still cannot survive the assistant's
 # whole turn ending (sandbox teardown kills it regardless of setsid).
+# After codex exits (success or not), persist a refresh token the CLI may have
+# rotated during the run -- before "done" is written, so the push is finished
+# by the time the caller sees completion. No-op without auth/credentials.json.
 setsid sh -c '
   JOB_DIR="$1"; shift
+  SKILL_DIR="$1"; shift
   PROMPT="$1"; shift
   codex exec "$@" "$PROMPT" </dev/null
   ec=$?
+  python3 "$SKILL_DIR/scripts/token_store.py" push || true
   echo "$ec" > "$JOB_DIR/exit_code"
   : > "$JOB_DIR/done"
   exit "$ec"
-' _bgrunner "$JOB_DIR" "$PROMPT" "$@" >"$JOB_DIR/log" 2>&1 &
+' _bgrunner "$JOB_DIR" "$SKILL_DIR" "$PROMPT" "$@" >"$JOB_DIR/log" 2>&1 &
 BGPID=$!
 echo "$BGPID" > "$JOB_DIR/pid"
 _stat="$(cat "/proc/$BGPID/stat" 2>/dev/null)" || _stat=""

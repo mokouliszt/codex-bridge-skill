@@ -11,13 +11,22 @@
 ### 認証
 - `$CODEX_HOME/auth.json` にChatGPT OAuthトークンを置くだけで `Logged in using ChatGPT`
 - 構造: `{auth_mode, OPENAI_API_KEY(null), tokens{id_token, access_token, refresh_token, account_id}, last_refresh}`
-- アクセストークンのリフレッシュはCLIが自動処理(こちらで実装不要)
+- アクセストークンのリフレッシュはCLIが自動処理(`last_refresh` から約8日、または401時)。
+  **リフレッシュトークンは使い捨て(ローテーション式)**で、同じRTの再使用は
+  `could not be refreshed because you have since logged out...` で失敗する。
+  会話をまたいでRTを生かすには永続化が要る → §7 token store
+- リフレッシュ要求(CLIと同一、2026-09 codex-cli 0.156.1 で端点・形式を確認):
+  `POST https://auth.openai.com/oauth/token`、JSON
+  `{client_id, grant_type:"refresh_token", refresh_token, scope:"openid profile email"}`。
+  無効RTには `401 {"error":{"code":"invalid_refresh_token",...}}`。
+  CLIは `CODEX_REFRESH_TOKEN_URL_OVERRIDE` で端点を差し替え可(テストで使用)
+- `cli_auth_credentials_store = "file"` で更新後トークンの保存先を auth.json に固定
 - サブスク認証時のAPI先: `chatgpt.com/backend-api/codex/responses`。
   未認証時は `api.openai.com/v1/responses` に行き401になる(=APIキー経路。使用禁止)
 - **APIキー禁止の担保**: 全スクリプトが `OPENAI_API_KEY`/`CODEX_API_KEY` をunset、
   auth.json内も null
 
-### モデル(ChatGPT Plus契約・2026-07時点のスナップショット)
+### モデル(ChatGPT Plus契約・2026-07時点のスナップショット時の一例 / 陳腐化済み)
 | id | default | efforts |
 |---|---|---|
 | gpt-5.6-sol | ✔ | low/medium/high/**xhigh/max/ultra** |
@@ -126,7 +135,7 @@ PKCE S256)を使う。定数がズレたら手順2-7でバイナリから再抽�
 
 - **既定モデル・effortは無い**。ユーザーの明示指定が無ければ実行前に問い直す(モデルは `models.sh choices` の性能上位順で提示)。Claudeの判断での別モデル・高effortへの切替は禁止(詳細はSKILL.mdの「モデル・推論レベルの決定」)
 - APIキー(従量課金)は**いかなる場合も使用しない**
-- auth.json・トークン・PATの中身を会話/ログ/成果物に出力しない
+- auth.json・トークン・`auth/credentials.json` の中身を会話/ログ/成果物に出力しない
 - サブスク枠を尊重: 無駄撃ちしない。ただし委譲された大規模作業は遠慮なく実行
 
 ---
@@ -209,3 +218,23 @@ init(tiniやdumb-init相当)ではないらしく、その状態でランナー�
 (フィールド番号を数え間違えるとstarttimeが常に不一致判定になり、生きている
 ジョブまでorphan扱いされる――実装時に一度この番号を数え間違えて気づいた)。
 
+## 7. token store(リフレッシュトークンの永続化、`scripts/token_store.py`)
+
+- 保存先: S3互換バケットの1オブジェクト(boto3、SigV4、path-style)。設定は
+  `auth/credentials.json`(`auth/credentials.json.example` 参照)。
+  endpointはホスト名でもURLでも可
+- boto3の新しい既定チェックサム(aws-chunkedトレーラ)は一部のS3互換実装で失敗するため
+  `request_checksum_calculation / response_checksum_validation = "when_required"`
+- 新旧判定: アクセストークンJWTの `iat`(無ければ `last_refresh`)。RT一致判定はsha256ハッシュ
+- 同時実行: S3互換では条件付きPUTが実装により異なるため使わず、PUT後に読み戻して検証。
+  別の会話の新しいトークンが上書きしていれば採用する。同じRTで2つの会話が同時に
+  リフレッシュした場合、負けた側は401を受けるので数秒待って保存側を再取得し、
+  別のRTになっていれば採用する(ベストエフォート)
+- 失敗は常に非致命(警告のみ、exit 0。`recover` のみ「回復不可」を exit 1 で返す)。
+  `credentials.json` が無ければ何もしない
+- 既知の制約: バケットでバージョニングが有効だと旧版にも過去のトークンが残る
+  (RTは使用済みで無効だが、アクセストークンは発行から最長10日有効)。気になる場合は
+  該当プレフィックスの旧版を短期で削除するライフサイクル設定を入れる。
+  またCLIが実行中にローテーションし、`push` 前にサンドボックスが破棄された場合は
+  新RTが失われる(`sync` の先回りリフレッシュでCLI側のローテーションを起きにくくしている)
+- テスト: `tests/test_token_store.py`(ローカルHTTPサーバでS3/OAuthを模擬。boto3必須)

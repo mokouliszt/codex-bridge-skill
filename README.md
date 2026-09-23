@@ -15,6 +15,7 @@ A Claude.ai [Skill](https://www.anthropic.com/news/skills) that runs the officia
 - **You pick the model and effort** — there is no default. If you haven't specified them in the conversation, Claude asks before running (using a multiple-choice UI when the environment has one, with free-form input still allowed), listing the models available on your plan strongest-first and effort levels suited to the task. Your choice carries over to retries and resumed sessions in the same conversation; Claude asks again rather than switching models or raising effort on its own. No automatic newest-model adoption or fallback; legacy model caches are ignored.
 - **Full Codex capability, unlocked** — web search on by default, least-restrictive execution flags (appropriate since it's already running inside Claude's own sandboxed environment), nested sandboxing (`codex sandbox`) for anything Codex should isolate further, `ultra` effort (automatic sub-agent task delegation) only when you choose it.
 - **Phone-only authentication** — no PC required. `scripts/login.py` walks through a PKCE-based OAuth flow entirely from the Claude mobile app: Claude prints an authorization URL, you complete it in your browser, then paste back the failed-redirect page's URL.
+- **Refresh tokens that survive the sandbox (optional)** — ChatGPT refresh tokens are single-use and rotate on every refresh, but Claude's sandbox (where the CLI writes the rotated token) is discarded after each conversation. With an `auth/credentials.json` for an S3-compatible bucket (Backblaze B2, R2, S3, MinIO, …), `token_store.py` keeps the newest `auth.json` as one object there: it is pulled and proactively refreshed at setup, pushed whenever the CLI rotates it, and used to recover without re-login when another conversation already rotated it.
 - **Self-healing auth** — if `auth.json` is missing entirely (e.g. a fresh checkout of this repo) or its refresh token has died, `setup.sh`/`ask.sh` detect it and automatically start the same phone-only re-auth flow instead of surfacing a raw CLI error.
 
 ## How it works
@@ -55,13 +56,23 @@ Copy the resulting `~/.codex/auth.json` (Windows: `%USERPROFILE%\.codex\auth.jso
 
 Upload the skill without an `auth.json` and tell Claude you want to authenticate with `login.py`. Claude generates an authorization URL → you open it and sign in → you copy the address-bar URL of the resulting failed-redirect page (`localhost:1455/...`) back to Claude, which exchanges it for `auth.json`. See the re-auth walkthrough in [`references/codex-cli-reference.md`](skills/codex-bridge/references/codex-cli-reference.md). This same flow now also **starts automatically** — Claude will kick it off itself the moment it notices `auth.json` is missing or its refresh token has died, so you don't need to ask for it by name.
 
+### 1b. (Optional, recommended) Persist rotated refresh tokens
+
+Without this, the bundled `auth.json` stops working about 8 days after it was issued: the CLI refreshes it once in some conversation, and the rotated token disappears with that conversation's sandbox.
+
+1. Prepare an S3-compatible bucket. 
+2. Create a **dedicated** access key limited to that bucket (on B2: an application key with read/write access to the bucket and `namePrefix` `_codex-bridge/`).
+3. Copy `auth/credentials.json.example` to `auth/credentials.json` and fill in `endpoint`, `region`, `bucket`, `key_id`, `application_key` .
+
+If `auth/credentials.json` is absent, all of this is skipped and the skill behaves exactly as before (boto3 is not even installed). The first setup seeds the object from the bundled `auth.json`; from then on the stored copy is always used. Check with `python3 scripts/token_store.py status` (prints dates only). If the bucket keeps old versions, previous tokens remain in them (used refresh tokens are dead, access tokens live up to 10 days); add a lifecycle rule for the prefix if that matters to you.
+
 ### 2. Zip it up and upload to Claude.ai
 
 ```bash
 zip -r codex-bridge.skill.zip codex-bridge/
 ```
 
-Upload from Claude.ai → Settings → Capabilities → Skills. Once uploaded, it's available from both the web and mobile apps on that account.
+Upload from Claude.ai → Settings → Skills. Once uploaded, it's available from both the web and mobile apps on that account.
 
 ### 3. Use it
 
@@ -85,6 +96,7 @@ There is no default model or effort: `ask.sh` requires both (effort as the secon
 | `scripts/jobs.sh` | `list` / `clean [max_age_seconds]` for background jobs — recovery if a `job_id` gets lost, and housekeeping for finished jobs. |
 | `scripts/_lib.sh` | Shared shell functions (`ask.sh`/`wait.sh` only — not meant to be run directly): job-id validation, liveness/crash detection, and the auth-failure auto-recovery trigger. |
 | `scripts/models.sh` | Lists models available on your plan (`list`, raw order) or the same list ranked strongest-first for the model question Claude asks you (`choices`). |
+| `scripts/token_store.py` | Optional refresh-token persistence in an S3-compatible bucket (`sync` / `push` / `recover` / `status`), driven automatically by `setup.sh`, `ask.sh`, the auth-failure handler and `login.py`. No-op without `auth/credentials.json`. |
 | `scripts/sessions.sh` | Lists / exports / imports Codex sessions, for continuing work across separate Claude conversations. |
 | `scripts/login.py` | The phone-only PKCE auth flow — generates and exchanges `auth.json` without a PC. |
 
@@ -92,7 +104,7 @@ Operational knowledge for Claude itself (verified flags, config, the app-server 
 
 ## Security notes
 
-- **`auth/auth.json` is a full-access token for your ChatGPT account.**
+- **`auth/auth.json` is a full-access token for your ChatGPT account, and `auth/credentials.json` grants access to the bucket that stores it.** Treat both the same way.
   - Keep any skill zip that contains it inside your own Claude.ai account only.
 - Using Codex consumes your subscription's usage allowance (rough measured cost: ~2.2k tokens for a simple answer, ~6.4k with web search, ~7.5k+ to resume a session, scaling with history length).
 - `setup.sh` sets a restrictive `umask` and 700/600 permissions on everything under `$CODEX_HOME`, including background job directories, since job logs and prompts can contain the same kind of content as the rest of your conversation.

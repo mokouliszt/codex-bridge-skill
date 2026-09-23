@@ -146,7 +146,11 @@ def cmd_exchange(arg: str, verifier_override) -> None:
     except OSError:
         pass
     print(f"OK: {out} を生成 (refresh_token: {'あり' if auth['tokens']['refresh_token'] else 'なし!'})")
-    print("次: `codex login status` で確認。skill zipのauth/auth.jsonも更新を忘れずに。")
+    # token store (auth/credentials.json) があれば新トークンを即保存。無ければ何もしない
+    import subprocess
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                 "token_store.py"), "push"], check=False)
+    print("次: `codex login status` で確認。token store未設定なら、skill zipのauth/auth.jsonも更新を忘れずに。")
 
 
 def main() -> None:

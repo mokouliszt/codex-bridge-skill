@@ -1,6 +1,6 @@
 ---
 name: codex-bridge
-description: ユーザーのChatGPTサブスクリプション枠(Codex OAuth)で、サンドボックス内から公式Codex CLI(codex exec)を呼び出し、GPTモデルに知識照会や作業委譲を行う。モデルと推論レベルに既定値は無く、ユーザーの明示指定が無ければ実行前にユーザーへ問い直す(選択式UIがあれば優先、モデルは性能上位順に提示)。ユーザーが「Codexに聞いて」「GPTの意見も」「セカンドオピニオン」「Codexにやらせて」等と言及した場合に加え、(a)Claude自身の知識では確信が持てない高度・専門的な問題で照会先が欲しい場合、(b)長大な生成・網羅的作業・大量ファイル処理などClaudeのトークン消費が激しくなる作業をオフロードしたい場合にも、Claudeの判断で必ずこのSkillを使用する。APIキーは使用禁止(サブスク枠のみ)。認証はskill同梱のauth.jsonで完結する。
+description: ユーザーのChatGPTサブスクリプション枠(Codex OAuth)で、サンドボックス内から公式Codex CLI(codex exec)を呼び出し、GPTモデルに知識照会や作業委譲を行う。モデルと推論レベルに既定値は無く、ユーザーの明示指定が無ければ実行前にユーザーへ問い直す(選択式UIがあれば優先、モデルは性能上位順に提示)。ユーザーが「Codexに聞いて」「GPTの意見も」「セカンドオピニオン」「Codexにやらせて」等と言及した場合に加え、(a)Claude自身の知識では確信が持てない高度・専門的な問題で照会先が欲しい場合、(b)長大な生成・網羅的作業・大量ファイル処理などClaudeのトークン消費が激しくなる作業をオフロードしたい場合にも、Claudeの判断で必ずこのSkillを使用する。APIキーは使用禁止(サブスク枠のみ)。認証はskill同梱のauth.jsonで完結する(auth/credentials.jsonがあればローテーション後のリフレッシュトークンをS3互換ストレージに永続化)。
 ---
 
 # codex-bridge — サブスク枠のCodex(GPT)をClaudeの手足・相談役にする
@@ -149,6 +149,32 @@ URL・手順をそのままユーザーへ中継し、貼り返された失敗�
 `ask.sh`がcodex execを試みることはない(setup.sh後もauth.jsonが無ければexit 3で
 明示的に止まり、生のCLIエラーは出さない)。
 
+### 1b. リフレッシュトークンの永続化(token store、任意)
+
+ChatGPTのリフレッシュトークンは**使い捨て(ローテーション式)**。リフレッシュのたびに新しい
+トークンが発行され、古いものは無効になる。skill同梱の `auth/auth.json` は読み取り専用、
+サンドボックスの `$CODEX_HOME/auth.json` は会話終了で消えるため、何もしないと
+「同梱トークンは最初の1回のリフレッシュで使い切り → 次の会話で再ログイン」になる
+(CLIは発行から約8日で自動リフレッシュする)。
+
+`auth/credentials.json`(S3互換ストレージの認証情報)が
+同梱されていれば、`scripts/token_store.py` が**S3互換バケットの1オブジェクト**
+(既定キー `_codex-bridge/auth.json`)に最新のauth.jsonを保存・取得し、会話をまたいで
+トークンを生かし続ける。**無ければ全処理がスキップされ従来どおり動く**(boto3も入れない)。
+Claude側で呼び出す必要は基本的に無い:
+
+- `setup.sh` → `token_store.py sync`: 同梱/保存済みのうち新しい方を採用し、古ければ
+  (発行7日超 or アクセストークン残り2日未満)その場でリフレッシュして即保存
+- `ask.sh` のジョブ終了時(成功・失敗問わず、`done` 書き込み前)→ `push`:
+  実行中にCLIがローテーションしていれば保存(変化なしなら無言)
+- 認証切れ検知時 → `recover`: 別の会話が既にローテーション済みで保存側が新しければ
+  それを採用し `auth_status=recovered` を返す。**この場合は再ログイン不要で、同じ
+  `ask.sh` を再実行するだけ**。保存側も無効なら従来どおり `login.py gen` へ
+- `login.py exchange` 成功時 → `push`(新規ログインの結果を即保存)
+
+状態確認: `python3 ./skills/codex-bridge/scripts/token_store.py status`(日付のみ出力)。
+token storeのエラーは警告を出すだけで、ask.sh等の処理は止めない。
+
 ### 2. 実行
 
 ```bash
@@ -193,7 +219,9 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示" <effort> 
 
 | 症状 | 対処 |
 |---|---|
-| 401 / リフレッシュトークン失効(auth.jsonは存在するが無効) | **自動検出済み**: ask.sh/wait.shがcodexの失敗ログを見て検知し、その場で`login.py gen`を実行してURLを出す。ユーザーへ中継→貼り戻されたURLで`login.py exchange`するだけでよい |
+| `status=failed auth_status=recovered` | token storeに新しいトークンがあり差し替え済み。同じ `ask.sh` をそのまま再実行する(再ログイン不要) |
+| 401 / リフレッシュトークン失効(auth.jsonは存在するが無効) | **自動検出済み**: ask.sh/wait.shがcodexの失敗ログを見て検知し、token storeで回復できなければその場で`login.py gen`を実行してURLを出す。ユーザーへ中継→貼り戻されたURLで`login.py exchange`するだけでよい |
+| `[token-store] warning: S3 get/put failed (AccessDenied 等)` / `... is missing: ...` | `auth/credentials.json` のendpoint・bucket・キー・権限(対象バケット/プレフィックスへの読み書き)を確認するようユーザーに伝える。処理自体は継続する |
 | auth.jsonが最初から存在しない | setup.shが自動的に同じ`login.py gen`フローへ入る(上と同じ手順)。ask.sh exit 3 |
 | `ask.sh` が exit 2「model and effort are required」 | モデルまたはeffortが未指定。「モデル・推論レベルの決定」節に従いユーザーへ問い直してから再実行 |
 | `ask.sh` が exit 75 | エラーではない。バックグラウンドへ切り替わっただけ。`job_id`を控えて`wait.sh`を呼び続ける(「長時間タスクとサンドボックスの生存」節) |
@@ -206,7 +234,7 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示" <effort> 
 
 ## 注意
 
-- auth.json・トークン文字列を会話/成果物/ログに**絶対に転記しない**(login.py実行時に
+- auth.json・トークン文字列・`auth/credentials.json` の中身を会話/成果物/ログに**絶対に転記しない**(login.py実行時に
   表示されるPKCE verifier・認可URLも同様に扱う――コンテナ再起動対策として画面には出るが、
   会話の要約やメモリへの保存対象にはしない)
 - skill配置ディレクトリは読み取り専用のため、実行時状態はすべて `$CODEX_HOME`
