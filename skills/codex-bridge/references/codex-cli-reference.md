@@ -47,11 +47,11 @@ codex exec resume --last "prompt"            直前セッションの継続(コ�
 - 実行ヘッダに `model / approval / sandbox / reasoning effort` が表示されるので設定確認に使える
 - 実測: web検索付きの簡単な質問で約6.4kトークン消費
 
-### config.toml(`$CODEX_HOME/config.toml`、現在の既定値)
+### config.toml(`$CODEX_HOME/config.toml`、setup.shが生成する基本設定)
+
+モデル・effortは意図的に書かない(既定値を持たない方針。ask.shが毎回 `-m` / `-c model_reasoning_effort=` で渡す)。
 
 ```toml
-model = "gpt-6-astra"
-model_reasoning_effort = "medium"
 check_updates = false
 
 [tools]
@@ -90,7 +90,7 @@ stdioでnewline-delimited JSON-RPC:
 1. `codex --version` — まずバージョンを見る。0.144.1と違えば以下を再確認
 2. `codex exec --help` / `codex --help` — フラグ名・サブコマンドの変化を確認
 3. `codex features list` — 機能の追加/削除/デフォルト変化
-4. `sh scripts/models.sh list` — 契約上の現行モデルとeffort対応。
+4. `sh scripts/models.sh list` — 契約上の現行モデルとeffort対応(`choices` は同じ一覧を性能上位順に並べたもの)。
    失敗するならapp-serverプロトコル変更 → `codex app-server generate-json-schema` で
    スキーマを取り、`model/list` 相当のメソッド名を探す
 5. `codex doctor` — インストール・設定・認証・ランタイムの一括診断
@@ -124,7 +124,7 @@ PKCE S256)を使う。定数がズレたら手順2-7でバイナリから再抽�
 
 ## 4. 運用上の約束(ユーザー指定)
 
-- 既定は **GPT-6.0 Astra (`gpt-6-astra`) + medium**。ユーザーの明示指定がない限りAstraのlow/mediumのみ。別モデル・high以上への自動切替は禁止(詳細はSKILL.mdのモデルポリシー)
+- **既定モデル・effortは無い**。ユーザーの明示指定が無ければ実行前に問い直す(モデルは `models.sh choices` の性能上位順で提示)。Claudeの判断での別モデル・高effortへの切替は禁止(詳細はSKILL.mdの「モデル・推論レベルの決定」)
 - APIキー(従量課金)は**いかなる場合も使用しない**
 - auth.json・トークン・PATの中身を会話/ログ/成果物に出力しない
 - サブスク枠を尊重: 無駄撃ちしない。ただし委譲された大規模作業は遠慮なく実行

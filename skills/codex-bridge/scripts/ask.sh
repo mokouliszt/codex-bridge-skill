@@ -2,12 +2,18 @@
 # codex-bridge runner
 #
 # usage:
-#   ask.sh "prompt" [effort] [model]      effort: medium(default) | low; other levels only on explicit user request
-#   ask.sh --continue "prompt"            resume the most recent session
-#   ask.sh --resume <session_id> "prompt" resume a specific session (id: sessions.sh list)
+#   ask.sh "prompt" <effort> [model]                    new session
+#   ask.sh --continue "prompt" <effort> [model]         resume the most recent session
+#   ask.sh --resume <session_id> "prompt" <effort> [model]
+#                                                      resume a specific session (id: sessions.sh list)
+#
+# There is NO default model or effort. Both are required on every call (model via
+# the 3rd argument or CODEX_MODEL). They must come from the user: either what the
+# user explicitly specified in the conversation, or their answer when Claude asked
+# them (models.sh choices gives the ranked list to offer). See SKILL.md.
 #
 # env:
-#   CODEX_MODEL=<id>              explicit user model override (else: gpt-6-astra)
+#   CODEX_MODEL=<id>              model chosen/specified by the user (3rd argument wins)
 #   CODEX_JSON=1                  emit JSONL events
 #   CODEX_DRYRUN=1                print the final command instead of executing
 #   CODEX_SEARCH=0                disable web search (default: enabled)
@@ -45,7 +51,25 @@ if [ "${1:-}" = "--continue" ] || [ "${1:-}" = "-C" ]; then
 elif [ "${1:-}" = "--resume" ] || [ "${1:-}" = "-r" ]; then
   RESUME_ID="${2:?--resume requires a session id}"; shift 2
 fi
-[ $# -ge 1 ] || { echo "usage: ask.sh [--continue | --resume <id>] \"prompt\" [low|medium|high|xhigh|max|ultra] [model]"; exit 2; }
+[ $# -ge 1 ] || { echo "usage: ask.sh [--continue | --resume <id>] \"prompt\" <low|medium|high|xhigh|max|ultra> [model]"; exit 2; }
+
+PROMPT="$1"
+EFFORT="${2:-}"
+MODEL="${3:-${CODEX_MODEL:-}}"
+
+# No silent defaults: both values must be chosen by the user. Checked before
+# lazy setup so a missing choice costs nothing (no npm install, no auth flow).
+if [ -z "$MODEL" ] || [ -z "$EFFORT" ]; then
+  echo "[ask] model and effort are required (got model='${MODEL:-<none>}' effort='${EFFORT:-<none>}')." >&2
+  echo "[ask] If the user has not specified them, ask the user first:" >&2
+  echo "[ask]   sh \"$SKILL_DIR/scripts/models.sh\" choices   # ranked strongest-first" >&2
+  echo "[ask] then re-run: ask.sh [...] \"prompt\" <effort> <model>" >&2
+  exit 2
+fi
+case "$EFFORT" in
+  low|medium|high|xhigh|max|ultra) ;;
+  *) echo "[ask] unsupported effort '$EFFORT'; use low|medium|high|xhigh|max|ultra" >&2; exit 2 ;;
+esac
 
 # lazy setup
 if ! command -v codex >/dev/null 2>&1 || [ ! -f "$CODEX_HOME/auth.json" ]; then
@@ -60,17 +84,9 @@ if [ ! -f "$CODEX_HOME/auth.json" ]; then
   exit 3
 fi
 
-PROMPT="$1"
-EFFORT="${2:-medium}"
-MODEL="${3:-${CODEX_MODEL:-gpt-6-astra}}"
-
-# Always pass both values, including on resume: legacy config, model_cache and
-# session settings must not override the current defaults. The caller must only
-# select another model or effort outside low/medium on explicit user request.
-case "$EFFORT" in
-  low|medium|high|xhigh|max|ultra) ;;
-  *) echo "[ask] unsupported effort '$EFFORT'; use low|medium|high|xhigh|max|ultra" >&2; exit 2 ;;
-esac
+# Model and effort are always passed explicitly, including on resume, so a
+# legacy config.toml, model_cache or the resumed session's own settings can
+# never silently decide them.
 
 # Collision-checked job dir: mkdir (no -p) fails if it already exists, so a
 # same-second PID coincidence gets a retry instead of silently reusing/merging

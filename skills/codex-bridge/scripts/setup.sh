@@ -6,8 +6,9 @@
 #   checkout with credentials stripped), automatically starts the phone-only
 #   login flow (login.py gen) instead of just printing a hint -- the URL block
 #   below is meant to be relayed to the user verbatim.
-# - writes default config (gpt-6-astra / medium / web_search on)
-# - leaves existing config intact; ask.sh explicitly supplies model and effort
+# - writes base config (web_search on; deliberately NO model/effort -- those are
+#   chosen by the user and passed explicitly by ask.sh on every call)
+# - leaves existing config intact
 set -eu
 umask 077
 
@@ -73,13 +74,11 @@ sys.exit(1 if d.get("OPENAI_API_KEY") else 0)
   fi
 fi
 
-# 3) default config; Astra availability depends on the authenticated account
-#    model/effort can still be overridden per-call by ask.sh
+# 3) base config. No model / model_reasoning_effort on purpose: there is no
+#    default -- ask.sh always passes the user's choice via -m / -c.
 if [ ! -f "$CODEX_HOME/config.toml" ]; then
   cat > "$CODEX_HOME/config.toml" <<'EOF'
-# codex-bridge defaults (Astra medium policy)
-model = "gpt-6-astra"
-model_reasoning_effort = "medium"
+# codex-bridge base config (model/effort are chosen per call by the user)
 check_updates = false
 
 [tools]
@@ -88,9 +87,9 @@ EOF
   echo "[setup] config.toml written"
 fi
 
-# 4) No automatic model switching or model_cache lookup. ask.sh pins the
-#    default on every call, so old caches/configs cannot revive the Sol policy.
-#    Use models.sh list/resolve to check account availability when needed.
+# 4) No automatic model selection or model_cache lookup. ask.sh refuses to run
+#    without an explicit model and effort, so old caches/configs are never used.
+#    Use models.sh choices to get the ranked list to offer the user.
 
 # 5) status
 codex login status || true

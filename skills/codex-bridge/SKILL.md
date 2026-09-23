@@ -1,9 +1,9 @@
 ---
 name: codex-bridge
-description: ユーザーのChatGPTサブスクリプション枠(Codex OAuth)で、サンドボックス内から公式Codex CLI(codex exec)を呼び出し、GPT-6.0 Astra(既定medium、通常low/medium)に知識照会や作業委譲を行う。ユーザーが「Codexに聞いて」「GPTの意見も」「セカンドオピニオン」「Codexにやらせて」等と言及した場合に加え、(a)Claude自身の知識では確信が持てない高度・専門的な問題で照会先が欲しい場合、(b)長大な生成・網羅的作業・大量ファイル処理などClaudeのトークン消費が激しくなる作業をオフロードしたい場合にも、Claudeの判断で必ずこのSkillを使用する。APIキーは使用禁止(サブスク枠のみ)。認証はskill同梱のauth.jsonで完結する。
+description: ユーザーのChatGPTサブスクリプション枠(Codex OAuth)で、サンドボックス内から公式Codex CLI(codex exec)を呼び出し、GPTモデルに知識照会や作業委譲を行う。モデルと推論レベルに既定値は無く、ユーザーの明示指定が無ければ実行前にユーザーへ問い直す(選択式UIがあれば優先、モデルは性能上位順に提示)。ユーザーが「Codexに聞いて」「GPTの意見も」「セカンドオピニオン」「Codexにやらせて」等と言及した場合に加え、(a)Claude自身の知識では確信が持てない高度・専門的な問題で照会先が欲しい場合、(b)長大な生成・網羅的作業・大量ファイル処理などClaudeのトークン消費が激しくなる作業をオフロードしたい場合にも、Claudeの判断で必ずこのSkillを使用する。APIキーは使用禁止(サブスク枠のみ)。認証はskill同梱のauth.jsonで完結する。
 ---
 
-# codex-bridge — サブスク枠のCodex(GPT-6.0 Astra)をClaudeの手足・相談役にする
+# codex-bridge — サブスク枠のCodex(GPT)をClaudeの手足・相談役にする
 
 検証済み環境: codex-cli 0.144.1(2026-07-10)/ 0.150.1(2026-08-27, 実行系・認証系のみ再検証)。
 いずれもChatGPT認証で `gpt-5.6-sol` end-to-end動作確認済み。
@@ -74,9 +74,9 @@ Codexは実行ごとにセッション(全履歴)を `$CODEX_HOME/sessions/` に
 これを使うと**過去のやり取りを引き継いだまま**追加指示ができる(実弾検証済み)。
 
 ```bash
-bash ./skills/codex-bridge/scripts/ask.sh --continue "追加指示"        # 直近セッションを継続
-bash ./skills/codex-bridge/scripts/sessions.sh list                    # 一覧(id/日時/cwd/冒頭プロンプト)
-bash ./skills/codex-bridge/scripts/ask.sh --resume <session_id> "指示" # 特定セッションを再開
+bash ./skills/codex-bridge/scripts/ask.sh --continue "追加指示" <effort> <model>        # 直近セッションを継続
+bash ./skills/codex-bridge/scripts/sessions.sh list                                    # 一覧(id/日時/cwd/冒頭プロンプト)
+bash ./skills/codex-bridge/scripts/ask.sh --resume <session_id> "指示" <effort> <model> # 特定セッションを再開
 ```
 
 使い分け:
@@ -95,13 +95,38 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <session_id> "指示" # 特�
 - `codex exec resume --last` / `resume <id>` の他、`fork`(枝分かれ)・`archive`・`delete`
   等のセッション管理サブコマンドもある(references参照)
 
-## モデルポリシー(ユーザー指定・厳守)
+## モデル・推論レベルの決定(ユーザー指定・厳守)
 
-- **既定: GPT-6.0 Astra (`gpt-6-astra`) + `medium`**。簡単な照会・軽作業では `low` を選んでよい。迷ったら `medium`。
-- **ユーザーの明示指定がない限り、`gpt-6-astra` の `low` / `medium` のみ使用する。** 難問・大規模作業・失敗時の再試行でも、Claudeの判断だけで別モデルや `high` / `xhigh` / `max` / `ultra` へ変更しない。
-- ユーザーがモデルまたはeffortを明示した場合は、その指定項目だけを上書きする。未指定の項目は上記の既定に従う。`CODEX_MODEL` や第3引数による別モデル指定も、ユーザーの明示指定を反映する時だけ使用する。
-- 新規実行・`--continue`・`--resume` すべてに同じルールを適用する。旧 `model_cache`・既存config・再開セッションの設定は既定値として採用しない。
-- **最新モデルへの自動追随は行わない。** `scripts/models.sh list` は利用可能モデルの確認、`resolve` は Astra のlow/medium対応確認専用。Astraが利用できない場合は自動フォールバックせず、ユーザーに代替モデルの指定を求める。
+**既定のモデル・effortは存在しない。** `ask.sh` はモデルとeffortの両方が渡されない限り
+実行を拒否する(exit 2、セットアップや認証フローにも進まない)。呼び出し前に次の順で決める:
+
+1. **ユーザーがこの会話で明示している場合 → それを使う。**
+   モデル名・effortの指定のほか、「おまかせ」「任せる」等の一任も明示とみなし、
+   一任された項目はClaudeがタスクに応じて選ぶ。片方だけ明示されている場合は、
+   もう片方だけを問う。
+2. **明示がない場合 → 実行前にユーザーへ問い直す。**
+   Claudeの判断でこのSkillを使う場面(descriptionの(a)(b))も例外ではない。
+   - まず `sh ./skills/codex-bridge/scripts/models.sh choices` を実行し、現在契約上
+     利用可能なモデルを**性能上位順**で取得する(記憶にあるモデル名を使わない)
+   - **選択式でユーザーに問えるツール(選択肢ボタン等)が使える環境ではそれを優先する。**
+     無い環境では通常のテキストで問う。どちらの場合も黙って任意の値で実行しない
+   - モデルの選択肢は `choices` の順(性能の高いモデルから)に並べる。選択肢数に上限が
+     ある場合は上位から収め、それ以外のモデルも任意入力で指定できる旨を添える。
+     `choices` の並び順は id のtier名(astra > sol > terra > luna)と世代による
+     ヒューリスティックなので、未知のtier名が現れた等で明らかにおかしい場合は
+     Claudeの判断で妥当な位置へ並べ替えてよい
+   - effortの選択肢は、タスクの難度・規模に見合うものをClaudeが適宜選んで提示する
+     (全段階を並べる必要はない。推奨を添えるのは可)
+   - 可能ならモデルとeffortを1回の問いでまとめて聞く
+   - 選ばれた組み合わせがそのモデルで非対応のeffort(`choices` の efforts 列に無い)
+     なら、実行せずに問い直す
+3. **一度決まった選択は、同じ会話内の後続呼び出し(再試行・`--continue`・`--resume`
+   を含む)に引き継ぐ。** ただしタスクの性質が大きく変わった場合や、失敗を受けて
+   別モデル・高いeffortへ変えたくなった場合は、Claudeの判断で変更せず改めて問う。
+
+- モデル名は `models.sh` が返したものだけを使い、推測で作らない。
+- **最新モデルへの自動追随・自動フォールバックは行わない。** 旧 `model_cache`・既存
+  config・再開セッションの設定は参照しない(`ask.sh` が毎回 `-m` とeffortを明示する)。
 - **APIキー使用は禁止**。スクリプトが `OPENAI_API_KEY`/`CODEX_API_KEY` を強制unsetし、
   ChatGPT認証(サブスク枠)のみで動作する
 
@@ -113,7 +138,7 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <session_id> "指示" # 特�
 bash ./skills/codex-bridge/scripts/setup.sh
 ```
 
-npm install(20〜40秒)→ auth.json配置 → config.toml生成(Astra medium) → ログイン状態表示。
+npm install(20〜40秒)→ auth.json配置 → config.toml生成(web検索ON。モデル・effortは書かない) → ログイン状態表示。
 `command -v codex` で導入済み判定可。
 
 **auth.jsonがskill同梱にもCODEX_HOMEにも一切無い場合**(公開リポジトリからの新規
@@ -127,15 +152,17 @@ URL・手順をそのままユーザーへ中継し、貼り返された失敗�
 ### 2. 実行
 
 ```bash
-bash ./skills/codex-bridge/scripts/ask.sh "プロンプト"                # Astra + medium + web検索
-bash ./skills/codex-bridge/scripts/ask.sh "プロンプト" low            # 簡単な照会・軽作業
-bash ./skills/codex-bridge/scripts/ask.sh "プロンプト" high           # ユーザーがhighを明示した場合のみ
-bash ./skills/codex-bridge/scripts/ask.sh --continue "追加指示"       # 直前セッション継続
-bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示"    # 特定セッション再開
+bash ./skills/codex-bridge/scripts/models.sh choices                              # 提示用モデル一覧(性能上位順)
+bash ./skills/codex-bridge/scripts/ask.sh "プロンプト" <effort> <model>            # 例: "…" medium gpt-6-astra
+CODEX_MODEL=<model> bash ./skills/codex-bridge/scripts/ask.sh "プロンプト" <effort> # env指定も可(第3引数が優先)
+bash ./skills/codex-bridge/scripts/ask.sh --continue "追加指示" <effort> <model>    # 直前セッション継続
+bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示" <effort> <model> # 特定セッション再開
 ```
 
 - 最終回答: stdout + `/tmp/codex_last.md`(長い場合はファイルを読む方が確実)
-- env: `CODEX_MODEL=<id>` モデル上書き / `CODEX_JSON=1` JSONLイベント出力 /
+- `<effort>` / `<model>` はユーザーが明示または選択したもの(「モデル・推論レベルの決定」節)。
+  web検索は既定で有効
+- env: `CODEX_MODEL=<id>` ユーザーが選んだモデル(第3引数の代わり) / `CODEX_JSON=1` JSONLイベント出力 /
   `CODEX_DRYRUN=1` 実行せずコマンド確認 /
   `CODEX_ASYNC=1` 最初からバックグラウンド実行(長時間タスク前提) /
   `CODEX_INLINE_MAX_SECONDS=<n>` インライン待機の上限(既定240)
@@ -152,7 +179,7 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示"    # 特�
 - **ネストサンドボックス**: Codexはbubblewrap同梱で `codex sandbox <cmd>` により
   自前の隔離環境をさらに展開できる(動作確認済み)。危険な実験をCodex自身に隔離させたい時に
   プロンプトで指示可能
-- **ultra effort**: ユーザーが明示指定した場合のみ利用可。通常はAstra low/mediumを使う
+- **ultra effort**: ユーザーが明示または選択した場合のみ利用可(サブエージェント自動委譲。対応モデルは `models.sh choices` の efforts 列で確認)
 - **その他stable機能**: browser_use / computer_use / image_generation / hooks / apps 等
   (`codex features list` で確認)。必要に応じてプロンプトから利用を促せる
 
@@ -168,12 +195,13 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示"    # 特�
 |---|---|
 | 401 / リフレッシュトークン失効(auth.jsonは存在するが無効) | **自動検出済み**: ask.sh/wait.shがcodexの失敗ログを見て検知し、その場で`login.py gen`を実行してURLを出す。ユーザーへ中継→貼り戻されたURLで`login.py exchange`するだけでよい |
 | auth.jsonが最初から存在しない | setup.shが自動的に同じ`login.py gen`フローへ入る(上と同じ手順)。ask.sh exit 3 |
+| `ask.sh` が exit 2「model and effort are required」 | モデルまたはeffortが未指定。「モデル・推論レベルの決定」節に従いユーザーへ問い直してから再実行 |
 | `ask.sh` が exit 75 | エラーではない。バックグラウンドへ切り替わっただけ。`job_id`を控えて`wait.sh`を呼び続ける(「長時間タスクとサンドボックスの生存」節) |
 | `wait.sh` が `status=unknown` | job_idの誤り/期限切れ、または不正な形式(パス区切りを含む等)。`jobs.sh list` で確認 |
 | `wait.sh` が `status=crashed exit_code=125` | ジョブプロセスがdone/exit_code書き込み前に消えた(OOM・SIGKILL・PID再利用の誤検出等)。ログtailを見て原因を確認。ポーリングし続ける必要はない、実質的な失敗として扱う |
 | `setup.sh` が exit 4 | auth.jsonがAPIキー形式(`OPENAI_API_KEY`が非null)。ユーザー方針違反として自動的にauth.jsonを削除して停止する。ChatGPT認証で作り直すこと |
 | `stream disconnected` / Reconnecting | 一時的なネットワーク断。リトライで解消することが多い |
-| モデル名エラー(400) | `scripts/models.sh list` で契約上の有効モデルを確認 |
+| モデル名エラー(400) | `scripts/models.sh choices` で契約上の有効モデルを確認し、ユーザーに選び直してもらう |
 | フラグ/設定キーが効かない | CLI更新で仕様変更の可能性。references の自己調査手順へ |
 
 ## 注意
