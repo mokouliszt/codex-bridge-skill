@@ -35,11 +35,14 @@ usage
                            rotated it (no-op when unchanged)
   token_store.py recover [--since <epoch>]
                            after a dead-refresh-token failure: adopt the remote
-                           copy if it holds a different token (exit 0 = retry).
+                           copy if it holds a different, not-older token
+                           (exit 0 = retry).
                            --since = failed job's start time (see cmd_recover)
   token_store.py status    one-line summary (dates only, never token values)
 
-Nothing here ever prints token values.
+A stored object that is not a usable ChatGPT auth.json (bad JSON, API-key auth,
+no refresh token) is treated as absent by sync/push, so a valid local token
+overwrites it. Nothing here ever prints token values.
 """
 import base64
 import hashlib
@@ -83,6 +86,10 @@ class StoreError(RuntimeError):
     pass
 
 
+class CorruptObject(StoreError):
+    """The stored object exists but is not a usable ChatGPT auth.json."""
+
+
 def load_config():
     """-> dict, or None when the token store is not configured (feature off)."""
     if not os.path.isfile(CRED_FILE):
@@ -107,13 +114,14 @@ def jwt_claims(token):
     try:
         part = token.split(".")[1]
         part += "=" * (-len(part) % 4)
-        return json.loads(base64.urlsafe_b64decode(part))
+        claims = json.loads(base64.urlsafe_b64decode(part))
     except Exception:  # noqa: BLE001
         return {}
+    return claims if isinstance(claims, dict) else {}
 
 
 def parse_ts(s):
-    if not s:
+    if not s or not isinstance(s, str):
         return 0.0
     m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?", s)
     if not m:
@@ -122,17 +130,25 @@ def parse_ts(s):
     return base.timestamp() + float(m.group(2) or 0)
 
 
+def _tokens(auth):
+    t = auth.get("tokens") if isinstance(auth, dict) else None
+    return t if isinstance(t, dict) else {}
+
+
 def freshness(auth):
     """When this token set was issued (access-token iat, else last_refresh)."""
-    if not auth:
+    if not isinstance(auth, dict):
         return 0.0
-    iat = jwt_claims((auth.get("tokens") or {}).get("access_token", "")).get("iat")
-    return float(iat) if iat else parse_ts(auth.get("last_refresh"))
+    iat = jwt_claims(_tokens(auth).get("access_token", "")).get("iat")
+    try:
+        return float(iat) if iat else parse_ts(auth.get("last_refresh"))
+    except (TypeError, ValueError):
+        return parse_ts(auth.get("last_refresh"))
 
 
 def rt_hash(auth):
-    rt = ((auth or {}).get("tokens") or {}).get("refresh_token") or ""
-    return hashlib.sha256(rt.encode()).hexdigest() if rt else ""
+    rt = _tokens(auth).get("refresh_token")
+    return hashlib.sha256(rt.encode()).hexdigest() if isinstance(rt, str) and rt else ""
 
 
 def fmt(ts):
@@ -144,13 +160,16 @@ def is_stale(auth):
     last = parse_ts(auth.get("last_refresh")) or freshness(auth)
     if now - last >= STALE_DAYS * 86400:
         return True
-    exp = jwt_claims((auth.get("tokens") or {}).get("access_token", "")).get("exp")
-    return bool(exp) and float(exp) - now < AT_MARGIN_S
+    exp = jwt_claims(_tokens(auth).get("access_token", "")).get("exp")
+    try:
+        return bool(exp) and float(exp) - now < AT_MARGIN_S
+    except (TypeError, ValueError):
+        return True
 
 
 def valid_chatgpt_auth(auth):
     return (isinstance(auth, dict) and not auth.get("OPENAI_API_KEY")
-            and (auth.get("tokens") or {}).get("refresh_token"))
+            and bool(rt_hash(auth)))
 
 
 def read_local():
@@ -203,10 +222,12 @@ def _client_error(e, op):
 
 
 def s3_pull(cfg):
-    """-> auth dict, or None if the object does not exist yet."""
+    """-> auth dict, or None if the object does not exist yet.
+    Raises CorruptObject if it exists but is not a usable ChatGPT auth.json."""
+    client = s3(cfg)  # first: turns a missing boto3 into StoreError
     from botocore.exceptions import BotoCoreError, ClientError
     try:
-        obj = s3(cfg).get_object(Bucket=cfg["bucket"], Key=cfg["object_key"])
+        obj = client.get_object(Bucket=cfg["bucket"], Key=cfg["object_key"])
         body = obj["Body"].read()
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
@@ -216,15 +237,30 @@ def s3_pull(cfg):
     except BotoCoreError as e:
         raise StoreError(f"S3 get failed ({e.__class__.__name__})")
     try:
-        return json.loads(body)
+        auth = json.loads(body)
     except ValueError:
-        raise StoreError("stored object is not valid auth.json")
+        raise CorruptObject("stored object is not valid JSON")
+    if not valid_chatgpt_auth(auth):
+        raise CorruptObject("stored object is not a ChatGPT auth.json with a refresh token")
+    return auth
+
+
+def pull_or_none(cfg, note=True):
+    """s3_pull, but a corrupt object reads as absent so callers holding a valid
+    local token overwrite it (self-heal) instead of warning forever."""
+    try:
+        return s3_pull(cfg)
+    except CorruptObject as e:
+        if note:
+            log(f"{e} -- treating it as empty; it will be replaced by a valid local token")
+        return None
 
 
 def s3_put(cfg, auth):
+    client = s3(cfg)  # first: turns a missing boto3 into StoreError
     from botocore.exceptions import BotoCoreError, ClientError
     try:
-        s3(cfg).put_object(Bucket=cfg["bucket"], Key=cfg["object_key"],
+        client.put_object(Bucket=cfg["bucket"], Key=cfg["object_key"],
                            Body=json.dumps(auth, indent=2).encode(),
                            ContentType="application/json")
     except ClientError as e:
@@ -276,9 +312,13 @@ def cmd_status(cfg):
     if not cfg:
         log(f"store=disabled local_issued={fmt(freshness(local))}")
         return 0
-    remote = s3_pull(cfg)
+    try:
+        remote = s3_pull(cfg)
+        remote_issued = fmt(freshness(remote))
+    except CorruptObject:
+        remote, remote_issued = None, "corrupt"
     same = rt_hash(local) == rt_hash(remote) and bool(local)
-    log(f"store=s3 local_issued={fmt(freshness(local))} remote_issued={fmt(freshness(remote))} "
+    log(f"store=s3 local_issued={fmt(freshness(local))} remote_issued={remote_issued} "
         f"in_sync={'yes' if same else 'no'} local_stale={'yes' if local and is_stale(local) else 'no'}")
     return 0
 
@@ -290,7 +330,7 @@ def push_with_retry(cfg, auth):
     for _ in range(3):
         s3_put(cfg, auth)
         time.sleep(float(os.environ.get("CODEX_BRIDGE_STORE_SETTLE", "1")))
-        remote = s3_pull(cfg)
+        remote = pull_or_none(cfg, note=False)
         if rt_hash(remote) == rt_hash(auth):
             return auth
         if remote and valid_chatgpt_auth(remote) and freshness(remote) >= freshness(auth):
@@ -306,7 +346,7 @@ def cmd_push(cfg):
     local = read_local()
     if not valid_chatgpt_auth(local):
         return 0
-    remote = s3_pull(cfg)
+    remote = pull_or_none(cfg)
     if rt_hash(local) == rt_hash(remote):
         return 0  # unchanged: the common case, stay silent
     if remote and freshness(remote) > freshness(local):
@@ -322,7 +362,7 @@ def cmd_sync(cfg):
     if not cfg:
         return 0
     local = read_local()
-    remote = s3_pull(cfg)
+    remote = pull_or_none(cfg)
     if valid_chatgpt_auth(remote) and freshness(remote) > freshness(local):
         write_local(remote)
         local = remote
@@ -342,7 +382,7 @@ def cmd_sync(cfg):
             # moment ago; give its push a few seconds to land, then adopt it.
             for _ in range(3):
                 time.sleep(2)
-                remote = s3_pull(cfg)
+                remote = pull_or_none(cfg, note=False)
                 if remote and rt_hash(remote) != tried and valid_chatgpt_auth(remote):
                     write_local(remote)
                     log("refresh was rejected but the store has a newer token -- adopted it")
@@ -368,10 +408,15 @@ def cmd_recover(cfg, since=None):
     if not cfg:
         return 1
     local = read_local()
-    remote = s3_pull(cfg)
+    remote = s3_pull(cfg)  # corrupt -> StoreError -> warning + exit 1 in main()
     if not valid_chatgpt_auth(remote):
         return 1
     if rt_hash(remote) != rt_hash(local):
+        if valid_chatgpt_auth(local) and freshness(remote) < freshness(local):
+            # An older token than the one that just failed is almost surely
+            # spent too; skip the wasted retry and go straight to re-login.
+            log(f"stored token is older (issued {fmt(freshness(remote))}) than the failed one -- not adopting")
+            return 1
         write_local(remote)
         log(f"adopted stored token (issued {fmt(freshness(remote))}) -- retry the same call")
         return 0
@@ -399,6 +444,10 @@ def main():
         if args[0] == "recover":
             return cmd_recover(cfg, since)
         return cmds[args[0]](cfg)
+    except ImportError as e:  # belt and braces: any missing boto3/botocore piece
+        log(f"warning: boto3 is not usable ({e.__class__.__name__}: {e.name or e}) "
+            "-- pip install boto3 --break-system-packages")
+        return 1 if args[0] == "recover" else 0
     except (StoreError, urllib.error.URLError, OSError) as e:
         # Never fatal for the caller: the token store is a best-effort layer.
         log(f"warning: {e}")

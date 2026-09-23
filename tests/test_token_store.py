@@ -233,6 +233,54 @@ class TokenStoreTest(unittest.TestCase):
         self.assertEqual(self.run_ts('recover', '--since', str(started)).returncode, 0)
         self.assertEqual(self.run_ts('recover', '--since', str(int(time.time()) + 60)).returncode, 1)
 
+    def test_recover_does_not_adopt_older_stored_token(self):
+        now = int(time.time())
+        self.set_local(auth('rt-dead', now))
+        self.fake.file = auth('rt-older', now - 3 * 86400)
+        r = self.run_ts('recover')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('older', r.stdout)
+        self.assertEqual(self.local()['tokens']['refresh_token'], 'rt-dead')
+
+    def test_corrupt_store_is_overwritten_by_valid_local(self):
+        now = int(time.time())
+        for broken in (b'{not json', [1, 2], {'tokens': {}}, auth('rt-x', now, api_key='sk-test')):
+            for cmd in ('push', 'sync'):
+                with self.subTest(broken=broken, cmd=cmd):
+                    self.fake.file = broken
+                    self.set_local(auth('rt-a', now - 3600))
+                    r = self.run_ts(cmd)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertNotIn('Traceback', r.stderr)
+                    self.assertEqual(self.fake.file['tokens']['refresh_token'], 'rt-a')
+
+    def test_corrupt_store_status_and_recover_do_not_crash(self):
+        self.fake.file = b'{not json'
+        self.set_local(auth('rt-a', int(time.time())))
+        r = self.run_ts('status')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('remote_issued=corrupt', r.stdout)
+        r = self.run_ts('recover')
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn('Traceback', r.stderr)
+        self.assertEqual(self.local()['tokens']['refresh_token'], 'rt-a')
+
+    def test_missing_boto3_is_a_warning_not_a_traceback(self):
+        shadow = self.home.parent / 'noboto'
+        for mod in ('boto3', 'botocore'):
+            (shadow / mod).mkdir(parents=True)
+            (shadow / mod / '__init__.py').write_text(
+                'raise ModuleNotFoundError("No module named %r", name=%r)\n' % (mod, mod))
+        self.env['PYTHONPATH'] = str(shadow)
+        self.set_local(auth('rt-a', int(time.time())))
+        for cmd, code in (('status', 0), ('push', 0), ('sync', 0), ('recover', 1)):
+            with self.subTest(cmd=cmd):
+                r = self.run_ts(cmd)
+                self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                self.assertNotIn('Traceback', r.stderr)
+                self.assertIn('boto3', r.stdout)
+        self.assertEqual(self.local()['tokens']['refresh_token'], 'rt-a')
+
     def test_bad_credentials_are_a_warning_not_a_failure(self):
         self.set_local(auth('rt-a', int(time.time())))
         orig = Handler.do_GET

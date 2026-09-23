@@ -174,6 +174,8 @@ Claude側で呼び出す必要は基本的に無い:
 
 状態確認: `python3 ./skills/codex-bridge/scripts/token_store.py status`(日付のみ出力)。
 token storeのエラーは警告を出すだけで、ask.sh等の処理は止めない。
+保存オブジェクトが壊れていれば(JSON不正・refresh token無し等)、`sync`/`push` が有効な
+ローカルトークンで上書きして自己修復する。
 
 ### 2. 実行
 
