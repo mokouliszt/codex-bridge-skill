@@ -1,4 +1,4 @@
-# ChatGPT アカウントの認証トークン — 絶対にコミットしない
+# ChatGPT アカウントの認証トークン
 auth/auth.json
 auth/github.env
 
