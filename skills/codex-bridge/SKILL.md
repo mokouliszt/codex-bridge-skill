@@ -164,7 +164,10 @@ ChatGPTのリフレッシュトークンは**使い捨て(ローテーション�
 Claude側で呼び出す必要は基本的に無い:
 
 - `setup.sh` → `token_store.py sync`: 同梱/保存済みのうち新しい方を採用し、古ければ
-  (発行7日超 or アクセストークン残り2日未満)その場でリフレッシュして即保存
+  (発行7日超 or アクセストークン残り2日未満)その場でリフレッシュして即保存。
+  リフレッシュが拒否され保存側にも新しいトークンが無ければ(exit 10)、setup.shが
+  `auth.json` を `auth.json.dead` へ退避し、**その場で `login.py gen` を実行する**
+  (「1. セットアップ」節のauth.json無しの場合と同じ手順。`ask.sh` はログイン完了まで exit 3)
 - `ask.sh` のジョブ終了時(成功・失敗問わず、`done` 書き込み前)→ `push`:
   実行中にCLIがローテーションしていれば保存(変化なしなら無言)
 - 認証切れ検知時 → `recover`: 別の会話が既にローテーション済みで保存側が新しければ
@@ -224,6 +227,7 @@ bash ./skills/codex-bridge/scripts/ask.sh --resume <id> "追加指示" <effort> 
 | `status=failed auth_status=recovered` | token storeに新しいトークンがあり差し替え済み。同じ `ask.sh` をそのまま再実行する(再ログイン不要) |
 | 401 / リフレッシュトークン失効(auth.jsonは存在するが無効) | **自動検出済み**: ask.sh/wait.shがcodexの失敗ログを見て検知し、token storeで回復できなければその場で`login.py gen`を実行してURLを出す。ユーザーへ中継→貼り戻されたURLで`login.py exchange`するだけでよい |
 | `[token-store] warning: S3 get/put failed (AccessDenied 等)` / `... is missing: ...` | `auth/credentials.json` のendpoint・bucket・キー・権限(対象バケット/プレフィックスへの読み書き)を確認するようユーザーに伝える。処理自体は継続する |
+| setup.shが「refresh token was rejected」と出してURLを表示 | 同梱/保存済みトークンが失効済み。URLをユーザーへ中継→`login.py exchange`(auth.jsonが無い場合と同じ手順) |
 | auth.jsonが最初から存在しない | setup.shが自動的に同じ`login.py gen`フローへ入る(上と同じ手順)。ask.sh exit 3 |
 | `ask.sh` が exit 2「model and effort are required」 | モデルまたはeffortが未指定。「モデル・推論レベルの決定」節に従いユーザーへ問い直してから再実行 |
 | `ask.sh` が exit 75 | エラーではない。バックグラウンドへ切り替わっただけ。`job_id`を控えて`wait.sh`を呼び続ける(「長時間タスクとサンドボックスの生存」節) |

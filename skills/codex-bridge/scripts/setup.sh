@@ -10,7 +10,10 @@
 #   chosen by the user and passed explicitly by ask.sh on every call)
 # - leaves existing config intact
 # - if auth/credentials.json is present, syncs auth.json with the S3-compatible
-#   token store (token_store.py sync) so rotated refresh tokens survive the sandbox
+#   token store (token_store.py sync) so rotated refresh tokens survive the sandbox.
+#   If sync proves the token dead (refresh rejected, nothing newer stored), the
+#   dead auth.json is moved aside and the login flow starts immediately instead of
+#   letting the next ask.sh fail first.
 set -eu
 umask 077
 
@@ -34,7 +37,10 @@ echo "[setup] codex: $(codex --version)"
 #    (auth/credentials.json, an S3-compatible bucket) replace it with the newest
 #    rotated token and refresh it proactively if stale. Without
 #    auth/credentials.json this step is skipped entirely (no boto3 install either).
-if [ ! -f "$CODEX_HOME/auth.json" ] && [ -f "$SKILL_DIR/auth/auth.json" ]; then
+# (not after a dead token was moved aside in this sandbox: the bundled copy is
+#  that same or an older token, and the token store is still consulted by sync)
+if [ ! -f "$CODEX_HOME/auth.json" ] && [ ! -f "$CODEX_HOME/auth.json.dead" ] \
+   && [ -f "$SKILL_DIR/auth/auth.json" ]; then
   cp "$SKILL_DIR/auth/auth.json" "$CODEX_HOME/auth.json"
   chmod 600 "$CODEX_HOME/auth.json"
   echo "[setup] auth.json deployed to $CODEX_HOME"
@@ -46,11 +52,26 @@ if [ -f "$SKILL_DIR/auth/credentials.json" ]; then
       || pip install -q boto3 >/dev/null 2>&1 \
       || echo "[setup] boto3 install failed -- token store disabled for this sandbox"
   fi
-  python3 "$SKILL_DIR/scripts/token_store.py" sync || true
+  sync_rc=0
+  python3 "$SKILL_DIR/scripts/token_store.py" sync || sync_rc=$?
+  if [ "$sync_rc" = 10 ] && [ -f "$CODEX_HOME/auth.json" ]; then
+    # token_store.py EXIT_RELOGIN: OpenAI rejected the refresh and the store has
+    # nothing newer. Move the dead token aside so the login flow below starts now
+    # and ask.sh refuses to run (exit 3) until it is finished, instead of failing
+    # against the dead token and regenerating the login URL mid-flow.
+    mv -f "$CODEX_HOME/auth.json" "$CODEX_HOME/auth.json.dead"
+    TOKEN_DEAD=1
+  fi
 fi
 if [ ! -f "$CODEX_HOME/auth.json" ]; then
-  echo "[setup] NOT AUTHENTICATED: no auth/auth.json bundled with this skill, none in the token"
-  echo "        store, and none in \$CODEX_HOME."
+  if [ "${TOKEN_DEAD:-0}" = 1 ]; then
+    echo "[setup] NOT AUTHENTICATED: the refresh token was rejected (expired/revoked/already used)"
+    echo "        and the token store holds nothing newer. Moved it aside as"
+    echo "        \$CODEX_HOME/auth.json.dead."
+  else
+    echo "[setup] NOT AUTHENTICATED: no auth/auth.json bundled with this skill, none in the token"
+    echo "        store, and none in \$CODEX_HOME."
+  fi
   echo "[setup] starting the phone-only login flow now (no PC required) ..."
   echo
   python3 "$SKILL_DIR/scripts/login.py" gen

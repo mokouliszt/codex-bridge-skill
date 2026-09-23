@@ -30,7 +30,10 @@ Requires boto3 (setup.sh installs it only when credentials.json exists).
 
 usage
   token_store.py sync      setup-time: adopt whichever of local/remote is newer,
-                           refresh proactively if stale, and push the result
+                           refresh proactively if stale, and push the result.
+                           exit 10 (EXIT_RELOGIN) = the refresh was rejected and
+                           the store holds nothing newer: the token is dead and
+                           setup.sh should start the login flow right away
   token_store.py push      after a codex run: upload local auth.json if the CLI
                            rotated it (no-op when unchanged)
   token_store.py recover [--since <epoch>]
@@ -74,6 +77,11 @@ REFRESH_SCOPE = "openid profile email"
 # codex run whose sandbox might be torn down before we can push.
 STALE_DAYS = float(os.environ.get("CODEX_BRIDGE_REFRESH_DAYS", "7"))
 AT_MARGIN_S = 2 * 86400  # also refresh if the access token expires within 2 days
+
+# `sync` exit code meaning "the local token is dead and the store has nothing
+# newer -- start the login flow now" (setup.sh acts on it). Distinct from 1/2
+# (generic failure / usage) so a stray error is never mistaken for it.
+EXIT_RELOGIN = 10
 
 
 def log(msg):
@@ -353,8 +361,11 @@ def cmd_push(cfg):
         write_local(remote)  # another conversation rotated it after we started
         log("remote copy is newer -- adopted it instead of pushing")
         return 0
-    push_with_retry(cfg, local)
-    log(f"pushed rotated token (issued {fmt(freshness(local))})")
+    in_force = push_with_retry(cfg, local)
+    if rt_hash(in_force) == rt_hash(local):
+        # (when a concurrent newer token was adopted instead, push_with_retry
+        #  has already said so -- claiming a push here would be wrong)
+        log(f"pushed rotated token (issued {fmt(freshness(local))})")
     return 0
 
 
@@ -388,13 +399,14 @@ def cmd_sync(cfg):
                     log("refresh was rejected but the store has a newer token -- adopted it")
                     return 0
             log(f"refresh rejected ({e}); the stored token is dead too -- login flow required")
-            return 0
+            return EXIT_RELOGIN
         except (urllib.error.URLError, OSError) as e:
             log(f"refresh skipped (network: {e.__class__.__name__}); the CLI will retry on its own")
 
     if rt_hash(local) != rt_hash(remote):
-        local = push_with_retry(cfg, local)
-        log(f"store updated (issued {fmt(freshness(local))})")
+        in_force = push_with_retry(cfg, local)
+        if rt_hash(in_force) == rt_hash(local):
+            log(f"store updated (issued {fmt(freshness(local))})")
     return 0
 
 

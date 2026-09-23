@@ -9,6 +9,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -211,9 +212,36 @@ class TokenStoreTest(unittest.TestCase):
         def other_conversation_writes():   # lands right after our PUT
             self.fake.file = auth('rt-c', now)
         self.fake.after_put = other_conversation_writes
-        self.run_ts('push')
+        r = self.run_ts('push')
         self.assertEqual(self.local()['tokens']['refresh_token'], 'rt-c')
         self.assertEqual(self.fake.file['tokens']['refresh_token'], 'rt-c')
+        # it adopted the other writer's token, so it must not claim it pushed its own
+        self.assertIn('adopted', r.stdout)
+        self.assertNotIn('pushed rotated token', r.stdout)
+
+    def test_sync_concurrent_newer_writer_does_not_claim_store_updated(self):
+        now = int(time.time())
+        self.fake.file = auth('rt-a', now - 2 * 86400)
+        self.set_local(auth('rt-b', now - 86400))
+
+        def other_conversation_writes():
+            self.fake.file = auth('rt-c', now)
+        self.fake.after_put = other_conversation_writes
+        r = self.run_ts('sync')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.local()['tokens']['refresh_token'], 'rt-c')
+        self.assertIn('adopted', r.stdout)
+        self.assertNotIn('store updated', r.stdout)
+
+    def test_sync_dead_token_exits_relogin(self):
+        now = int(time.time())
+        self.set_local(auth('rt-old', now - 8 * 86400))
+        self.fake.file = auth('rt-old', now - 8 * 86400)
+        self.fake.valid_rt = 'rt-elsewhere'   # rejected, and no newer copy ever lands
+        r = self.run_ts('sync')
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        self.assertIn('login flow required', r.stdout)
+        self.assertEqual(self.local()['tokens']['refresh_token'], 'rt-old')
 
     def test_push_never_uploads_api_key_auth(self):
         self.set_local(auth('rt-a', int(time.time()), api_key='sk-test'))
@@ -310,7 +338,59 @@ class TokenStoreTest(unittest.TestCase):
         self.run_ts('sync')
         self.assertEqual(self.fake.file['tokens']['refresh_token'], 'rt-a')
 
-    # --- end-to-end through ask.sh with a mock codex binary -------------------
+    # --- end-to-end through setup.sh / ask.sh with a mock codex binary --------
+
+    def mock_codex(self, body='print("answer")\n'):
+        bindir = self.home.parent / 'bin'
+        bindir.mkdir(exist_ok=True)
+        cli = bindir / 'codex'
+        cli.write_text('#!/usr/bin/env python3\nimport json, os, sys, time\n'
+                       'if sys.argv[1:2] in (["--version"], ["login"]): print("mock"); sys.exit(0)\n'
+                       'open(os.environ["CODEX_HOME"] + "/exec_calls", "a").write("x\\n")\n' + body)
+        cli.chmod(0o700)
+        return dict(self.env, PATH=str(bindir) + os.pathsep + os.environ['PATH'])
+
+    def skill_copy(self, bundled):
+        """A copy of the skill whose auth/ holds a bundled auth.json and the
+        token-store credentials (setup.sh gates the store on that file)."""
+        dst = self.home.parent / 'skill'
+        shutil.copytree(SCRIPT.parents[1], dst, ignore=shutil.ignore_patterns('__pycache__'))
+        (dst / 'auth' / 'auth.json').write_text(json.dumps(bundled))
+        shutil.copy(self.envfile, dst / 'auth' / 'credentials.json')
+        return dst
+
+    def test_setup_dead_token_starts_login_immediately(self):
+        now = int(time.time())
+        dead = auth('rt-old', now - 8 * 86400)
+        self.fake.file = dead
+        self.fake.valid_rt = 'rt-elsewhere'
+        skill = self.skill_copy(dead)
+        env = self.mock_codex()
+        r = subprocess.run(['sh', str(skill / 'scripts/setup.sh')], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('refresh token was rejected', r.stdout)
+        self.assertIn('auth.openai.com/oauth/authorize', r.stdout)
+        self.assertFalse((self.home / 'auth.json').exists())
+        self.assertTrue((self.home / 'auth.json.dead').exists())
+        # ask.sh refuses to touch the dead token (exit 3) instead of failing
+        # against it; a second setup run must not re-seed the dead bundled copy
+        (skill / 'auth' / 'credentials.json').unlink()
+        r = subprocess.run(['sh', str(skill / 'scripts/ask.sh'), 'hi', 'low', 'gpt-test'], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertFalse((self.home / 'exec_calls').exists())
+
+    def test_setup_healthy_token_does_not_start_login(self):
+        now = int(time.time())
+        self.fake.file = auth('rt-stored', now - 86400)
+        skill = self.skill_copy(auth('rt-bundled', now - 9 * 86400))
+        r = subprocess.run(['sh', str(skill / 'scripts/setup.sh')], env=self.mock_codex(),
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn('oauth/authorize', r.stdout)
+        self.assertEqual(self.local()['tokens']['refresh_token'], 'rt-stored')
+        self.assertFalse((self.home / 'auth.json.dead').exists())
 
     def run_ask(self, codex_body):
         bindir = self.home.parent / 'bin'

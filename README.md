@@ -64,7 +64,7 @@ Without this, the bundled `auth.json` stops working about 8 days after it was is
 2. Create a **dedicated** access key limited to that bucket (on B2: an application key with read/write access to the bucket and `namePrefix` `_codex-bridge/`).
 3. Copy `auth/credentials.json.example` to `auth/credentials.json` and fill in `endpoint`, `region`, `bucket`, `key_id`, `application_key` .
 
-If `auth/credentials.json` is absent, all of this is skipped and the skill behaves exactly as before (boto3 is not even installed). The first setup seeds the object from the bundled `auth.json`; from then on the stored copy is always used. Check with `python3 scripts/token_store.py status` (prints dates only). If the bucket keeps old versions, previous tokens remain in them (used refresh tokens are dead, access tokens live up to 10 days); add a lifecycle rule for the prefix if that matters to you.
+If `auth/credentials.json` is absent, all of this is skipped and the skill behaves exactly as before (boto3 is not even installed). The first setup seeds the object from the bundled `auth.json`; from then on the stored copy is always used. Check with `python3 scripts/token_store.py status` (prints dates only). If the bucket keeps old versions, previous tokens remain in them (used refresh tokens are dead, access tokens live up to 10 days); add a lifecycle rule for the prefix if that matters to you. If the stored token turns out to be dead as well (the refresh is rejected and nothing newer is stored), setup moves it aside as `auth.json.dead` and starts the login flow right away instead of letting the next `ask.sh` fail first.
 
 ### 2. Zip it up and upload to Claude.ai
 
